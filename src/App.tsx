@@ -74,7 +74,6 @@ function ChatApp({
   const [error, setError] = useState<string | null>(null);
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [partnerProfile, setPartnerProfile] = useState<any | null>(null);
 
   const peerRef = useRef<PeerConnection | null>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
@@ -88,40 +87,6 @@ function ChatApp({
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { connRef.current = conn; }, [conn]);
   useEffect(() => { connectedAtRef.current = connectedAt; }, [connectedAt]);
-
-  // Force instant attachment of captured stream copies directly to native nodes
-  useEffect(() => {
-    if (localVideoRef.current && localStream) {
-      localVideoRef.current.srcObject = localStream;
-    }
-  }, [localStream, phase]);
-
-  useEffect(() => {
-    if (remoteVideoRef.current && remoteStream) {
-      remoteVideoRef.current.srcObject = remoteStream;
-    }
-  }, [remoteStream, phase]);
-
-  // Fetch match partner identity profiles dynamically on connection state activation
-  useEffect(() => {
-    if (!conn) {
-      setPartnerProfile(null);
-      return;
-    }
-    const partnerId = conn.initiator_id === myId ? conn.responder_id : conn.initiator_id;
-    
-    // Explicitly fetch user details to replace "Stranger" with real names
-    supabase
-      .from('profiles')
-      .select('display_name, avatar_url')
-      .eq('user_id', partnerId)
-      .maybeSingle()
-      .then(({ data, error }) => {
-        if (!error && data) {
-          setPartnerProfile(data);
-        }
-      });
-  }, [conn, myId]);
 
   useEffect(() => {
     pruneTimerRef.current = window.setInterval(() => {
@@ -149,7 +114,6 @@ function ChatApp({
       peerRef.current = null;
     }
     setRemoteStream(null);
-    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
   }, [myId]);
 
   const startSearching = useCallback(
@@ -164,9 +128,14 @@ function ChatApp({
       let stream: MediaStream | null = null;
       if (selectedMode === 'video') {
         try {
+          // FIX: Strictly apply echoCancellation and noiseSuppression to kill high-pitched shrills & loops
           stream = await navigator.mediaDevices.getUserMedia({
             video: { width: { ideal: 1280 }, height: { ideal: 720 } },
-            audio: true,
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true,
+            },
           });
           setLocalStream(stream);
         } catch (err: any) {
@@ -290,6 +259,7 @@ function ChatApp({
             conn={conn}
             myId={myId}
             mode={mode}
+            localStream={localStream}
             remoteStream={remoteStream}
             localVideoRef={localVideoRef}
             remoteVideoRef={remoteVideoRef}
@@ -300,7 +270,6 @@ function ChatApp({
             onNext={handleNext}
             onStop={handleStop}
             connectedAt={connectedAt}
-            partnerProfile={partnerProfile}
           />
         )}
       </main>
@@ -489,6 +458,7 @@ function ChatRoom({
   conn,
   myId,
   mode,
+  localStream,
   remoteStream,
   localVideoRef,
   remoteVideoRef,
@@ -499,11 +469,11 @@ function ChatRoom({
   onNext,
   onStop,
   connectedAt,
-  partnerProfile,
 }: {
   conn: ConnectionRow;
   myId: string;
   mode: ChatMode;
+  localStream: MediaStream | null;
   remoteStream: MediaStream | null;
   localVideoRef: React.RefObject<HTMLVideoElement>;
   remoteVideoRef: React.RefObject<HTMLVideoElement>;
@@ -514,9 +484,23 @@ function ChatRoom({
   onNext: () => void;
   onStop: () => void;
   connectedAt: number | null;
-  partnerProfile: any;
 }) {
   const [elapsed, setElapsed] = useState(0);
+  const [partnerProfile, setPartnerProfile] = useState<any | null>(null);
+
+  // FIX: Isolated reliable profile fetch inside ChatRoom instance to bypass mounting delay races
+  useEffect(() => {
+    if (!conn) return;
+    const partnerId = conn.initiator_id === myId ? conn.responder_id : conn.initiator_id;
+    supabase
+      .from('profiles')
+      .select('display_name, avatar_url')
+      .eq('user_id', partnerId)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (data) setPartnerProfile(data);
+      });
+  }, [conn, myId]);
 
   useEffect(() => {
     if (!connectedAt) return;
@@ -526,7 +510,7 @@ function ChatRoom({
 
   return (
     <div className="flex w-full h-full sm:h-auto sm:max-w-5xl flex-col sm:px-4">
-      {/* Absolute top dashboard on desktop view */}
+      {/* Top dashboard on desktop view */}
       <div className="hidden sm:flex items-center justify-between mb-3 mt-4">
         <div className="flex items-center gap-2 text-sm text-ink-muted">
           <span className="inline-flex h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
@@ -542,6 +526,7 @@ function ChatRoom({
 
       {mode === 'video' ? (
         <VideoRoom
+          localStream={localStream}
           remoteStream={remoteStream}
           localVideoRef={localVideoRef}
           remoteVideoRef={remoteVideoRef}
@@ -562,6 +547,7 @@ function ChatRoom({
 }
 
 function VideoRoom({
+  localStream,
   remoteStream,
   localVideoRef,
   remoteVideoRef,
@@ -574,6 +560,7 @@ function VideoRoom({
   elapsed,
   partnerProfile,
 }: {
+  localStream: MediaStream | null;
   remoteStream: MediaStream | null;
   localVideoRef: React.RefObject<HTMLVideoElement>;
   remoteVideoRef: React.RefObject<HTMLVideoElement>;
@@ -588,6 +575,19 @@ function VideoRoom({
 }) {
   const hasRemote = !!remoteStream && remoteStream.getTracks().length > 0;
   
+  // FIX: Force immediate inner-attachment on rendering mount to resolve parent lifecycle timing glitches
+  useEffect(() => {
+    if (localVideoRef.current && localStream) {
+      localVideoRef.current.srcObject = localStream;
+    }
+  }, [localStream, localVideoRef]);
+
+  useEffect(() => {
+    if (remoteVideoRef.current && remoteStream) {
+      remoteVideoRef.current.srcObject = remoteStream;
+    }
+  }, [remoteStream, remoteVideoRef]);
+
   // Mobile Gesture Tracking Mechanics (Horizontal Swipes to the Right triggers Skip)
   const touchStartX = useRef<number>(0);
   const touchEndX = useRef<number>(0);
@@ -601,9 +601,9 @@ function VideoRoom({
   };
 
   const handleTouchEnd = () => {
-    const threshold = 150; // Minimum swipe distance
+    const threshold = 150;
     if (touchEndX.current - touchStartX.current > threshold) {
-      onNext(); // Horizontal rightward swipe skips partner instantly
+      onNext();
     }
     touchStartX.current = 0;
     touchEndX.current = 0;
@@ -660,7 +660,7 @@ function VideoRoom({
         </div>
       </div>
 
-      {/* Floating UI Floating Controls Layer */}
+      {/* Floating UI Controls Layer */}
       <div className="absolute bottom-6 left-0 right-0 z-20 flex items-center justify-center gap-3 pt-1 px-4 sm:relative sm:bottom-0 sm:bg-transparent sm:px-0">
         <button
           onClick={onStop}
@@ -762,11 +762,11 @@ function TextRoom({
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Robust changes subscription to ensure flawless live texting sync
+  // FIX: Subscribing with precise formatting to ensure real-time text message syncing works flawlessly
   useEffect(() => {
     let active = true;
     
-    // Initial fetch
+    // Initial load fetch
     supabase
       .from('messages')
       .select('*')
@@ -776,9 +776,9 @@ function TextRoom({
         if (active && data) setMessages(data as MessageRow[]);
       });
 
-    // Explicitly target channel filter string format for precision
+    // Realtime channel creation matching connection row ID exactly
     const channel = supabase
-      .channel(`chat-room-${conn.id}`)
+      .channel(`chat-room-sync-${conn.id}`)
       .on(
         'postgres_changes',
         { 
