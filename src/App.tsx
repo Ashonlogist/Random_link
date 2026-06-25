@@ -109,13 +109,17 @@ function ChatApp({
       return;
     }
     const partnerId = conn.initiator_id === myId ? conn.responder_id : conn.initiator_id;
+    
+    // Explicitly fetch user details to replace "Stranger" with real names
     supabase
       .from('profiles')
       .select('display_name, avatar_url')
       .eq('user_id', partnerId)
       .maybeSingle()
-      .then(({ data }) => {
-        if (data) setPartnerProfile(data);
+      .then(({ data, error }) => {
+        if (!error && data) {
+          setPartnerProfile(data);
+        }
       });
   }, [conn, myId]);
 
@@ -758,7 +762,7 @@ function TextRoom({
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Safe table change handler to fix real-time texting sync reliably
+  // Robust changes subscription to ensure flawless live texting sync
   useEffect(() => {
     let active = true;
     
@@ -772,21 +776,24 @@ function TextRoom({
         if (active && data) setMessages(data as MessageRow[]);
       });
 
-    // Realtime changes listener
+    // Explicitly target channel filter string format for precision
     const channel = supabase
-      .channel(`public-messages-${conn.id}`)
+      .channel(`chat-room-${conn.id}`)
       .on(
         'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'messages' },
+        { 
+          event: 'INSERT', 
+          schema: 'public', 
+          table: 'messages',
+          filter: `connection_id=eq.${conn.id}`
+        },
         (payload) => {
           if (!active) return;
           const newMsg = payload.new as MessageRow;
-          if (newMsg.connection_id === conn.id) {
-            setMessages((prev) => {
-              if (prev.some((m) => m.id === newMsg.id)) return prev;
-              return [...prev, newMsg];
-            });
-          }
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === newMsg.id)) return prev;
+            return [...prev, newMsg];
+          });
         }
       )
       .subscribe();
