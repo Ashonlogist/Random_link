@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { supabase, type InstitutionType } from '../lib/supabase';
-import { Sparkles, ArrowRight, ArrowLeft, Loader2, GraduationCap, School, Building2, Cake, Sun, Moon } from 'lucide-react';
+import { Sparkles, ArrowRight, ArrowLeft, Loader2, GraduationCap, School, Building2, Cake, Sun, Moon, Camera } from 'lucide-react';
 
-type Step = 'name' | 'age' | 'institution' | 'school';
+type Step = 'name' | 'age' | 'institution' | 'school' | 'avatar';
 
 const INSTITUTIONS: { id: InstitutionType; label: string; desc: string; icon: React.ReactNode }[] = [
   { id: 'jhs', label: 'Junior High', desc: 'Grades / years before high school', icon: <School className="h-6 w-6" /> },
@@ -26,11 +26,29 @@ export function Onboarding({
   const [age, setAge] = useState('');
   const [institution, setInstitution] = useState<InstitutionType | null>(null);
   const [schoolName, setSchoolName] = useState('');
+  const [avatarFile, setAvatarFile] = useState<File | null>(null);
+  const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const stepIndex = ['name', 'age', 'institution', 'school'].indexOf(step);
-  const totalSteps = 4;
+  const steps: Step[] = ['name', 'age', 'institution', 'school', 'avatar'];
+  const stepIndex = steps.indexOf(step);
+  const totalSteps = steps.length;
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setError(null);
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      if (file.size > 2 * 1024 * 1024) {
+        setError('Image size must be less than 2MB.');
+        return;
+      }
+      setAvatarFile(file);
+      setAvatarPreview(URL.createObjectURL(file));
+    }
+  };
 
   const next = () => {
     setError(null);
@@ -44,6 +62,8 @@ export function Onboarding({
     } else if (step === 'institution') {
       if (!institution) return setError('Choose your institution type.');
       setStep('school');
+    } else if (step === 'school') {
+      setStep('avatar');
     }
   };
 
@@ -52,19 +72,38 @@ export function Onboarding({
     if (step === 'age') setStep('name');
     else if (step === 'institution') setStep('age');
     else if (step === 'school') setStep('institution');
+    else if (step === 'avatar') setStep('school');
   };
 
   const finish = async () => {
     setError(null);
     setLoading(true);
+    let uploadedAvatarUrl: string | null = null;
+
     try {
+      if (avatarFile) {
+        const fileExt = avatarFile.name.split('.').pop();
+        const filePath = `${userId}-${Math.random()}.${fileExt}`;
+
+        const { error: uploadError } = await supabase.storage
+          .from('avatars')
+          .upload(filePath, avatarFile, { upsert: true });
+
+        if (uploadError) throw uploadError;
+
+        const { data } = supabase.storage.from('avatars').getPublicUrl(filePath);
+        uploadedAvatarUrl = data?.publicUrl || null;
+      }
+
       const { error } = await supabase.from('profiles').insert({
         user_id: userId,
         display_name: displayName.trim(),
         age: parseInt(age, 10),
         institution_type: institution,
         school_name: schoolName.trim() || null,
+        avatar_url: uploadedAvatarUrl,
       });
+      
       if (error) throw error;
       onDone();
     } catch (err: any) {
@@ -171,11 +210,40 @@ export function Onboarding({
                 autoFocus
                 value={schoolName}
                 onChange={(e) => setSchoolName(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && finish()}
+                onKeyDown={(e) => e.key === 'Enter' && next()}
                 placeholder="e.g. Lincoln High (optional)"
                 className="w-full rounded-xl border border-line bg-bg px-4 py-3.5 text-ink placeholder-ink-faint focus:border-accent/50 focus:outline-none focus:ring-1 focus:ring-accent/50"
               />
               <p className="mt-2 text-xs text-ink-faint">Optional, but helps match you with classmates.</p>
+            </StepShell>
+          )}
+
+          {step === 'avatar' && (
+            <StepShell icon={<Camera className="h-5 w-5" />} title="Add a profile picture">
+              <div className="flex flex-col items-center justify-center py-4">
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  onChange={handleFileChange}
+                  accept="image/*"
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="group relative flex h-28 w-28 items-center justify-center overflow-hidden rounded-full border border-dashed border-line bg-bg transition hover:bg-bg-muted focus:outline-none"
+                >
+                  {avatarPreview ? (
+                    <img src={avatarPreview} alt="Avatar preview" className="h-full w-full object-cover" />
+                  ) : (
+                    <div className="flex flex-col items-center text-ink-faint transition group-hover:text-ink-muted">
+                      <Camera className="h-6 w-6 mb-1" />
+                      <span className="text-xs">Upload image</span>
+                    </div>
+                  )}
+                </button>
+                <p className="mt-3 text-center text-xs text-ink-faint">Optional. Max file size: 2MB.</p>
+              </div>
             </StepShell>
           )}
 
@@ -188,14 +256,16 @@ export function Onboarding({
           <div className="mt-5 flex items-center gap-2">
             {step !== 'name' && (
               <button
+                type="button"
                 onClick={back}
                 className="inline-flex items-center gap-1.5 rounded-xl border border-line bg-bg px-4 py-3 text-sm font-medium text-ink-muted transition hover:text-ink"
               >
                 <ArrowLeft className="h-4 w-4" /> Back
               </button>
             )}
-            {step !== 'school' ? (
+            {step !== 'avatar' ? (
               <button
+                type="button"
                 onClick={next}
                 className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-accent to-accent-2 py-3 text-sm font-semibold text-white transition hover:scale-[1.02] active:scale-[0.99]"
               >
@@ -203,6 +273,7 @@ export function Onboarding({
               </button>
             ) : (
               <button
+                type="button"
                 onClick={finish}
                 disabled={loading}
                 className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-accent to-accent-2 py-3 text-sm font-semibold text-white transition hover:scale-[1.02] active:scale-[0.99] disabled:opacity-50 disabled:hover:scale-100"

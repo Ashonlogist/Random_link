@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { supabase } from '../lib/supabase';
-import { Sparkles, Mail, Lock, Loader2, ArrowRight, Sun, Moon } from 'lucide-react';
+import { Sparkles, Mail, Lock, Loader2, ArrowRight, Sun, Moon, CheckCircle } from 'lucide-react';
 
 export function AuthScreen({
   theme,
@@ -9,7 +9,7 @@ export function AuthScreen({
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
 }) {
-  const [mode, setMode] = useState<'signin' | 'signup'>('signup');
+  const [mode, setMode] = useState<'signin' | 'signup' | 'verification_sent'>('signup');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -31,6 +31,7 @@ export function AuthScreen({
       if (mode === 'signup') {
         const { error } = await supabase.auth.signUp({ email, password });
         if (error) throw error;
+        setMode('verification_sent');
       } else {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
@@ -41,6 +42,45 @@ export function AuthScreen({
       setLoading(false);
     }
   };
+
+  if (mode === 'verification_sent') {
+    return (
+      <div className="relative flex min-h-screen items-center justify-center bg-bg px-4 py-10">
+        <button
+          onClick={onToggleTheme}
+          aria-label="Toggle theme"
+          className="absolute right-4 top-4 inline-flex h-10 w-10 items-center justify-center rounded-xl border border-line bg-bg-elev text-ink-muted transition hover:text-ink"
+        >
+          {theme === 'dark' ? <Sun className="h-5 w-5" /> : <Moon className="h-5 w-5" />}
+        </button>
+
+        <div className="w-full max-w-md text-center">
+          <div className="rounded-2xl border border-line bg-bg-elev p-8 shadow-2xl">
+            <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-500">
+              <CheckCircle className="h-10 w-10" />
+            </div>
+            <h1 className="text-2xl font-bold text-ink">Check your email</h1>
+            <p className="mt-3 text-sm text-ink-muted leading-relaxed">
+              We have sent a verification link to <span className="font-semibold text-ink">{email}</span>. Please click the link to confirm your account.
+            </p>
+            <div className="mt-4 rounded-xl bg-bg-muted p-3 text-xs text-ink-faint border border-line">
+              💡 Can't find it? Make sure to check your <strong>Spam</strong> or <strong>Junk</strong> folder!
+            </div>
+            <button
+              onClick={() => {
+                setMode('signin');
+                setPassword('');
+              }}
+              className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-accent to-accent-2 py-3.5 text-sm font-semibold text-white shadow-lg shadow-accent/20 transition hover:scale-[1.02] active:scale-[0.99]"
+            >
+              Back to Sign In
+              <ArrowRight className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="relative flex min-h-screen items-center justify-center bg-bg px-4 py-10">
@@ -64,6 +104,7 @@ export function AuthScreen({
         <div className="rounded-2xl border border-line bg-bg-elev p-6 shadow-2xl">
           <div className="mb-5 flex rounded-xl bg-bg-muted p-1">
             <button
+              type="button"
               onClick={() => setMode('signup')}
               className={`flex-1 rounded-lg py-2 text-sm font-medium transition ${
                 mode === 'signup' ? 'bg-accent text-white' : 'text-ink-muted hover:text-ink'
@@ -72,6 +113,7 @@ export function AuthScreen({
               Create account
             </button>
             <button
+              type="button"
               onClick={() => setMode('signin')}
               className={`flex-1 rounded-lg py-2 text-sm font-medium transition ${
                 mode === 'signin' ? 'bg-accent text-white' : 'text-ink-muted hover:text-ink'

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Video, MessageSquare, Shuffle, X, Send, Users, Loader2, Camera, CameraOff, ArrowLeft, Sparkles, LogOut, Sun, Moon, MoreVertical } from 'lucide-react';
+import { Video, MessageSquare, Shuffle, X, Send, Users, Loader2, Camera, CameraOff, ArrowLeft, Sparkles, LogOut, Sun, Moon, MoreVertical, Paperclip, Download, User } from 'lucide-react';
 import { supabase, type ChatMode, type ConnectionRow, type MessageRow, type Profile } from './lib/supabase';
 import { PeerConnection } from './lib/webrtc';
 import {
@@ -74,6 +74,7 @@ function ChatApp({
   const [error, setError] = useState<string | null>(null);
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [partnerProfile, setPartnerProfile] = useState<any | null>(null);
 
   const peerRef = useRef<PeerConnection | null>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
@@ -88,13 +89,35 @@ function ChatApp({
   useEffect(() => { connRef.current = conn; }, [conn]);
   useEffect(() => { connectedAtRef.current = connectedAt; }, [connectedAt]);
 
+  // Force instant attachment of captured stream copies directly to native nodes
   useEffect(() => {
-    if (localVideoRef.current && localStream) localVideoRef.current.srcObject = localStream;
-  }, [localStream]);
+    if (localVideoRef.current && localStream) {
+      localVideoRef.current.srcObject = localStream;
+    }
+  }, [localStream, phase]);
 
   useEffect(() => {
-    if (remoteVideoRef.current && remoteStream) remoteVideoRef.current.srcObject = remoteStream;
-  }, [remoteStream]);
+    if (remoteVideoRef.current && remoteStream) {
+      remoteVideoRef.current.srcObject = remoteStream;
+    }
+  }, [remoteStream, phase]);
+
+  // Fetch match partner identity profiles dynamically on connection state activation
+  useEffect(() => {
+    if (!conn) {
+      setPartnerProfile(null);
+      return;
+    }
+    const partnerId = conn.initiator_id === myId ? conn.responder_id : conn.initiator_id;
+    supabase
+      .from('profiles')
+      .select('display_name, avatar_url')
+      .eq('user_id', partnerId)
+      .maybeSingle()
+      .then(({ data }) => {
+        if (data) setPartnerProfile(data);
+      });
+  }, [conn, myId]);
 
   useEffect(() => {
     pruneTimerRef.current = window.setInterval(() => {
@@ -198,7 +221,6 @@ function ChatApp({
         setPhase('lobby');
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     [myId]
   );
 
@@ -210,8 +232,7 @@ function ChatApp({
     setConn(null);
     setConnectedAt(null);
     startSearching(modeRef.current);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [myId, teardownPeer]);
+  }, [myId, teardownPeer, startSearching]);
 
   const handleStop = useCallback(async () => {
     await teardownPeer();
@@ -240,18 +261,20 @@ function ChatApp({
   }, [localStream, micOn]);
 
   return (
-    <div className="flex min-h-screen flex-col bg-bg text-ink">
-      <Header
-        profile={profile}
-        email={email}
-        menuOpen={menuOpen}
-        setMenuOpen={setMenuOpen}
-        onSignOut={onSignOut}
-        theme={theme}
-        onToggleTheme={onToggleTheme}
-      />
-      <main className="flex flex-1 flex-col items-center justify-center px-4 py-6 pb-[calc(1.5rem+env(safe-area-inset-bottom))]">
-        {error && (
+    <div className="flex min-h-screen flex-col bg-bg text-ink overflow-x-hidden">
+      {phase !== 'connected' && (
+        <Header
+          profile={profile}
+          email={email}
+          menuOpen={menuOpen}
+          setMenuOpen={setMenuOpen}
+          onSignOut={onSignOut}
+          theme={theme}
+          onToggleTheme={onToggleTheme}
+        />
+      )}
+      <main className={`flex flex-1 flex-col items-center justify-center ${phase === 'connected' ? 'p-0 w-full h-screen' : 'px-4 py-6 pb-[calc(1.5rem+env(safe-area-inset-bottom))]'}`}>
+        {error && phase !== 'connected' && (
           <div className="mb-4 w-full max-w-md rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-600 dark:text-rose-200">
             {error}
           </div>
@@ -263,7 +286,6 @@ function ChatApp({
             conn={conn}
             myId={myId}
             mode={mode}
-            localStream={localStream}
             remoteStream={remoteStream}
             localVideoRef={localVideoRef}
             remoteVideoRef={remoteVideoRef}
@@ -274,10 +296,11 @@ function ChatApp({
             onNext={handleNext}
             onStop={handleStop}
             connectedAt={connectedAt}
+            partnerProfile={partnerProfile}
           />
         )}
       </main>
-      <Footer />
+      {phase !== 'connected' && <Footer />}
     </div>
   );
 }
@@ -462,7 +485,6 @@ function ChatRoom({
   conn,
   myId,
   mode,
-  localStream,
   remoteStream,
   localVideoRef,
   remoteVideoRef,
@@ -473,11 +495,11 @@ function ChatRoom({
   onNext,
   onStop,
   connectedAt,
+  partnerProfile,
 }: {
   conn: ConnectionRow;
   myId: string;
   mode: ChatMode;
-  localStream: MediaStream | null;
   remoteStream: MediaStream | null;
   localVideoRef: React.RefObject<HTMLVideoElement>;
   remoteVideoRef: React.RefObject<HTMLVideoElement>;
@@ -488,8 +510,10 @@ function ChatRoom({
   onNext: () => void;
   onStop: () => void;
   connectedAt: number | null;
+  partnerProfile: any;
 }) {
   const [elapsed, setElapsed] = useState(0);
+
   useEffect(() => {
     if (!connectedAt) return;
     const t = setInterval(() => setElapsed(Math.floor((Date.now() - connectedAt) / 1000)), 1000);
@@ -497,8 +521,9 @@ function ChatRoom({
   }, [connectedAt]);
 
   return (
-    <div className="flex w-full max-w-5xl flex-col">
-      <div className="mb-3 flex items-center justify-between">
+    <div className="flex w-full h-full sm:h-auto sm:max-w-5xl flex-col sm:px-4">
+      {/* Absolute top dashboard on desktop view */}
+      <div className="hidden sm:flex items-center justify-between mb-3 mt-4">
         <div className="flex items-center gap-2 text-sm text-ink-muted">
           <span className="inline-flex h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
           Connected · {formatTime(elapsed)}
@@ -513,7 +538,6 @@ function ChatRoom({
 
       {mode === 'video' ? (
         <VideoRoom
-          localStream={localStream}
           remoteStream={remoteStream}
           localVideoRef={localVideoRef}
           remoteVideoRef={remoteVideoRef}
@@ -522,16 +546,18 @@ function ChatRoom({
           onToggleCam={onToggleCam}
           onToggleMic={onToggleMic}
           onNext={onNext}
+          onStop={onStop}
+          elapsed={elapsed}
+          partnerProfile={partnerProfile}
         />
       ) : (
-        <TextRoom conn={conn} myId={myId} onNext={onNext} />
+        <TextRoom conn={conn} myId={myId} onNext={onNext} partnerProfile={partnerProfile} onStop={onStop} elapsed={elapsed} />
       )}
     </div>
   );
 }
 
 function VideoRoom({
-  localStream,
   remoteStream,
   localVideoRef,
   remoteVideoRef,
@@ -540,8 +566,10 @@ function VideoRoom({
   onToggleCam,
   onToggleMic,
   onNext,
+  onStop,
+  elapsed,
+  partnerProfile,
 }: {
-  localStream: MediaStream | null;
   remoteStream: MediaStream | null;
   localVideoRef: React.RefObject<HTMLVideoElement>;
   remoteVideoRef: React.RefObject<HTMLVideoElement>;
@@ -550,40 +578,102 @@ function VideoRoom({
   onToggleCam: () => void;
   onToggleMic: () => void;
   onNext: () => void;
+  onStop: () => void;
+  elapsed: number;
+  partnerProfile: any;
 }) {
   const hasRemote = !!remoteStream && remoteStream.getTracks().length > 0;
+  
+  // Mobile Gesture Tracking Mechanics (Horizontal Swipes to the Right triggers Skip)
+  const touchStartX = useRef<number>(0);
+  const touchEndX = useRef<number>(0);
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    touchStartX.current = e.targetTouches[0].clientX;
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    touchEndX.current = e.targetTouches[0].clientX;
+  };
+
+  const handleTouchEnd = () => {
+    const threshold = 150; // Minimum swipe distance
+    if (touchEndX.current - touchStartX.current > threshold) {
+      onNext(); // Horizontal rightward swipe skips partner instantly
+    }
+    touchStartX.current = 0;
+    touchEndX.current = 0;
+  };
+
   return (
-    <div className="flex flex-col gap-3">
-      <div className="relative aspect-video w-full overflow-hidden rounded-2xl border border-line bg-black shadow-2xl">
+    <div 
+      className="flex flex-col gap-3 w-full h-full sm:h-auto absolute inset-0 sm:relative bg-black sm:bg-transparent"
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+    >
+      {/* Video Framing Window */}
+      <div className="relative w-full h-full sm:h-auto sm:aspect-video overflow-hidden sm:rounded-2xl border-0 sm:border border-line bg-black shadow-2xl flex-1 sm:flex-initial">
         {hasRemote ? (
-          <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-cover" />
+          <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-cover absolute inset-0" />
         ) : (
-          <div className="flex h-full w-full flex-col items-center justify-center text-ink-faint">
+          <div className="flex h-full w-full flex-col items-center justify-center text-slate-400 absolute inset-0">
             <Loader2 className="h-8 w-8 animate-spin text-accent" />
             <p className="mt-3 text-sm">Connecting…</p>
           </div>
         )}
-        {/* local preview — top-right on mobile, bottom-right on desktop */}
-        <div className="absolute right-2 top-2 h-24 w-32 overflow-hidden rounded-lg border border-white/20 bg-slate-800 shadow-lg sm:bottom-3 sm:right-3 sm:top-auto sm:h-32 sm:w-44">
-          {localStream ? (
-            <video ref={localVideoRef} autoPlay playsInline muted className="h-full w-full object-cover" />
+
+        {/* Mobile Overlay Banner & Partner Details */}
+        <div className="absolute top-4 left-4 z-20 flex items-center gap-3 bg-black/40 backdrop-blur-md px-3 py-2 rounded-2xl border border-white/10 sm:bg-bg-elev/80 sm:border-line">
+          {partnerProfile?.avatar_url ? (
+            <img src={partnerProfile.avatar_url} alt="Partner" className="h-9 w-9 rounded-full object-cover border border-accent" />
           ) : (
-            <div className="flex h-full w-full items-center justify-center text-white/50">
-              <CameraOff className="h-5 w-5" />
+            <div className="h-9 w-9 rounded-full bg-accent/20 text-accent flex items-center justify-center border border-accent">
+              <User className="h-4 w-4" />
             </div>
           )}
+          <div className="flex flex-col">
+            <span className="text-sm font-semibold text-white sm:text-ink">{partnerProfile?.display_name || 'Stranger'}</span>
+            <span className="text-[10px] text-white/70 sm:text-ink-muted sm:hidden">Live · {formatTime(elapsed)}</span>
+          </div>
+        </div>
+
+        {/* Local Self Preview Box (Tiny Floating Frame) */}
+        <div className="absolute right-4 top-4 z-20 h-28 w-20 sm:h-32 sm:w-44 overflow-hidden rounded-xl border border-white/20 bg-slate-800 shadow-xl sm:bottom-3 sm:right-3 sm:top-auto">
+          <video 
+            ref={localVideoRef} 
+            autoPlay 
+            playsInline 
+            muted 
+            className="h-full w-full object-cover" 
+          />
           <span className="absolute bottom-1 left-1 rounded bg-black/50 px-1.5 py-0.5 text-[10px] text-white">You</span>
+        </div>
+
+        {/* Mobile floating swipe instruction banner */}
+        <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-10 sm:hidden text-center pointer-events-none">
+          <p className="text-xs text-white/50 bg-black/30 px-3 py-1 rounded-full backdrop-blur-sm">👉 Swipe right to skip</p>
         </div>
       </div>
 
-      {/* controls — large touch targets, centered */}
-      <div className="flex items-center justify-center gap-3 pt-1">
+      {/* Floating UI Floating Controls Layer */}
+      <div className="absolute bottom-6 left-0 right-0 z-20 flex items-center justify-center gap-3 pt-1 px-4 sm:relative sm:bottom-0 sm:bg-transparent sm:px-0">
+        <button
+          onClick={onStop}
+          className="inline-flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-black/40 backdrop-blur-md text-white transition active:scale-95 sm:hidden"
+          title="Leave match"
+        >
+          <ArrowLeft className="h-5 w-5" />
+        </button>
+
         <ControlButton onClick={onToggleCam} active={camOn} label={camOn ? 'Camera on' : 'Camera off'}>
           {camOn ? <Camera className="h-5 w-5" /> : <CameraOff className="h-5 w-5" />}
         </ControlButton>
+        
         <ControlButton onClick={onToggleMic} active={micOn} label={micOn ? 'Mic on' : 'Mic off'}>
           <MicIcon on={micOn} />
         </ControlButton>
+
         <button
           onClick={onNext}
           className="inline-flex h-14 items-center gap-2 rounded-2xl bg-gradient-to-r from-accent to-accent-2 px-7 text-sm font-semibold text-white shadow-lg shadow-accent/20 transition hover:scale-105 active:scale-95"
@@ -613,8 +703,8 @@ function ControlButton({
       aria-label={label}
       className={`inline-flex h-14 w-14 items-center justify-center rounded-2xl border transition active:scale-95 ${
         active
-          ? 'border-line bg-bg-elev text-ink'
-          : 'border-rose-500/40 bg-rose-500/10 text-rose-500 dark:text-rose-300'
+          ? 'border-white/10 bg-black/40 backdrop-blur-md text-white sm:border-line sm:bg-bg-elev sm:text-ink'
+          : 'border-rose-500/40 bg-rose-500/20 text-rose-300 backdrop-blur-md sm:bg-rose-500/10 sm:text-rose-500 dark:text-rose-300'
       }`}
     >
       {children}
@@ -646,36 +736,62 @@ function MicOffIcon() {
   );
 }
 
-function TextRoom({ conn, myId, onNext }: { conn: ConnectionRow; myId: string; onNext: () => void }) {
+function TextRoom({ 
+  conn, 
+  myId, 
+  onNext, 
+  partnerProfile,
+  onStop,
+  elapsed
+}: { 
+  conn: ConnectionRow; 
+  myId: string; 
+  onNext: () => void; 
+  partnerProfile: any;
+  onStop: () => void;
+  elapsed: number;
+}) {
   const [messages, setMessages] = useState<MessageRow[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Unified Postgres Real-Time Change subscription handler
   useEffect(() => {
     let active = true;
-    (async () => {
-      const { data } = await supabase
-        .from('messages')
-        .select('*')
-        .eq('connection_id', conn.id)
-        .order('created_at', { ascending: true });
-      if (active && data) setMessages(data as MessageRow[]);
-    })();
+    
+    // Initial population fetch
+    supabase
+      .from('messages')
+      .select('*')
+      .eq('connection_id', conn.id)
+      .order('created_at', { ascending: true })
+      .then(({ data }) => {
+        if (active && data) setMessages(data as MessageRow[]);
+      });
 
+    // Realtime channel creation
     const channel = supabase
       .channel(`msgs-${conn.id}`)
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'messages', filter: `connection_id=eq.${conn.id}` },
-        (payload) => setMessages((prev) => [...prev, payload.new as MessageRow])
+        (payload) => {
+          if (!active) return;
+          const newMsg = payload.new as MessageRow;
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === newMsg.id)) return prev;
+            return [...prev, newMsg];
+          });
+        }
       )
       .subscribe();
 
     return () => {
       active = false;
-      supabase.channel(`msgs-${conn.id}`).unsubscribe();
-      void channel;
+      channel.unsubscribe();
     };
   }, [conn.id]);
 
@@ -683,11 +799,12 @@ function TextRoom({ conn, myId, onNext }: { conn: ConnectionRow; myId: string; o
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages]);
 
-  const send = async () => {
-    const body = input.trim();
+  const send = async (textBody?: string) => {
+    const body = (textBody ?? input).trim();
     if (!body || sending) return;
+    if (!textBody) setInput('');
     setSending(true);
-    setInput('');
+
     const { error } = await supabase.from('messages').insert({
       connection_id: conn.id,
       sender_id: myId,
@@ -695,39 +812,124 @@ function TextRoom({ conn, myId, onNext }: { conn: ConnectionRow; myId: string; o
     });
     setSending(false);
     if (error) {
-      setInput(body);
+      if (!textBody) setInput(body);
       console.error(error);
     }
   };
 
+  // Multi-media File Picker & Storage Bucket uploader
+  const handleAttachmentPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      setUploading(true);
+      try {
+        const fileExt = file.name.split('.').pop();
+        const path = `${conn.id}/${Date.now()}-${Math.random()}.${fileExt}`;
+        
+        const { error: uploadError } = await supabase.storage
+          .from('attachments')
+          .upload(path, file);
+
+        if (uploadError) throw uploadError;
+
+        const { data } = supabase.storage.from('attachments').getPublicUrl(path);
+        if (data?.publicUrl) {
+          await send(data.publicUrl);
+        }
+      } catch (err) {
+        console.error('Attachment transmission failure:', err);
+      } finally {
+        setUploading(false);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+      }
+    }
+  };
+
+  const isImageUrl = (url: string) => {
+    return url.match(/\.(jpeg|jpg|gif|png|webp|svg)/i) != null || url.includes('storage.googleapis.com') || url.includes('supabase.co');
+  };
+
   return (
-    <div className="flex h-[68vh] flex-col overflow-hidden rounded-2xl border border-line bg-bg-elev shadow-2xl sm:h-[70vh]">
-      <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4">
+    <div className="flex h-screen sm:h-[68vh] flex-col overflow-hidden sm:rounded-2xl border-0 sm:border border-line bg-bg sm:bg-bg-elev shadow-2xl w-full">
+      {/* Mobile-first top matching status banner */}
+      <div className="flex sm:hidden items-center justify-between p-4 border-b border-line bg-bg-elev">
+        <div className="flex items-center gap-3">
+          {partnerProfile?.avatar_url ? (
+            <img src={partnerProfile.avatar_url} alt="Partner" className="h-8 w-8 rounded-full object-cover" />
+          ) : (
+            <div className="h-8 w-8 rounded-full bg-accent/10 text-accent flex items-center justify-center">
+              <User className="h-4 w-4" />
+            </div>
+          )}
+          <div className="flex flex-col">
+            <span className="text-sm font-semibold text-ink">{partnerProfile?.display_name || 'Stranger'}</span>
+            <span className="text-[10px] text-ink-muted">Texting · {formatTime(elapsed)}</span>
+          </div>
+        </div>
+        <button onClick={onStop} className="text-xs font-medium text-rose-500 bg-rose-500/10 px-3 py-1.5 rounded-xl">Leave</button>
+      </div>
+
+      {/* Messages Stream Segment */}
+      <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4 bg-bg sm:bg-transparent">
         {messages.length === 0 && (
           <div className="flex h-full flex-col items-center justify-center text-center text-ink-faint">
             <MessageSquare className="h-8 w-8" />
-            <p className="mt-2 text-sm">Say hi! Your message will appear here.</p>
+            <p className="mt-2 text-sm">Say hi to {partnerProfile?.display_name || 'stranger'}!</p>
           </div>
         )}
         {messages.map((m) => {
           const mine = m.sender_id === myId;
+          const text = m.body;
+          const isLink = text.startsWith('http://') || text.startsWith('https://');
+
           return (
             <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
               <div
                 className={`max-w-[78%] rounded-2xl px-4 py-2 text-sm ${
                   mine
-                    ? 'rounded-br-sm bg-gradient-to-br from-accent to-accent-2 text-white'
-                    : 'rounded-bl-sm bg-bg-muted text-ink'
+                    ? 'rounded-br-sm bg-gradient-to-br from-accent to-accent-2 text-white shadow-md shadow-accent/10'
+                    : 'rounded-bl-sm bg-bg-muted text-ink border border-line'
                 }`}
               >
-                {m.body}
+                {isLink ? (
+                  isImageUrl(text) ? (
+                    <div className="py-1">
+                      <img src={text} alt="Shared preview" className="rounded-lg max-h-48 object-contain bg-black/5" />
+                      <a href={text} target="_blank" rel="noreferrer" className="block text-[11px] underline mt-1 text-center opacity-80">Open Full Size</a>
+                    </div>
+                  ) : (
+                    <a href={text} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1.5 underline break-all font-medium">
+                      <Download className="h-4 w-4 shrink-0" />
+                      Download Attachment File
+                    </a>
+                  )
+                ) : (
+                  <p className="break-words whitespace-pre-wrap">{text}</p>
+                )}
               </div>
             </div>
           );
         })}
       </div>
-      <div className="border-t border-line p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
+
+      {/* Controller Messaging Console Tray */}
+      <div className="border-t border-line p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] bg-bg-elev">
         <div className="flex items-center gap-2">
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleAttachmentPick}
+            className="hidden"
+          />
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            disabled={uploading || sending}
+            className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-line bg-bg text-ink-muted transition hover:text-ink active:scale-95 disabled:opacity-40"
+            aria-label="Upload attachment"
+          >
+            {uploading ? <Loader2 className="h-5 w-5 animate-spin text-accent" /> : <Paperclip className="h-5 w-5" />}
+          </button>
+
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -741,7 +943,7 @@ function TextRoom({ conn, myId, onNext }: { conn: ConnectionRow; myId: string; o
             className="flex-1 rounded-xl border border-line bg-bg px-4 py-3 text-ink placeholder-ink-faint focus:border-accent/50 focus:outline-none focus:ring-1 focus:ring-accent/50"
           />
           <button
-            onClick={send}
+            onClick={() => send()}
             disabled={sending || !input.trim()}
             className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-gradient-to-r from-accent to-accent-2 text-white transition hover:scale-105 active:scale-95 disabled:opacity-40 disabled:hover:scale-100"
             aria-label="Send"
@@ -751,7 +953,7 @@ function TextRoom({ conn, myId, onNext }: { conn: ConnectionRow; myId: string; o
         </div>
         <button
           onClick={onNext}
-          className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-line bg-bg py-2.5 text-sm font-medium text-ink-muted transition hover:text-ink"
+          className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-line bg-bg py-2.5 text-sm font-medium text-ink-muted transition hover:text-ink active:scale-[0.99]"
         >
           <Shuffle className="h-4 w-4" /> Next stranger
         </button>

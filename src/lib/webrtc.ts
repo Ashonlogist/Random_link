@@ -40,6 +40,7 @@ export class PeerConnection {
     this.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
 
     this.pc.onconnectionstatechange = () => {
+      if (this.closed) return;
       const state = this.pc.connectionState;
       if (state === 'connected') this.events.onConnected?.();
       if (state === 'disconnected' || state === 'failed' || state === 'closed') {
@@ -48,10 +49,12 @@ export class PeerConnection {
     };
 
     this.pc.ontrack = (e) => {
+      if (this.closed) return;
       this.events.onRemoteStream?.(e.streams[0]);
     };
 
     this.pc.onicecandidate = (e) => {
+      if (this.closed) return;
       if (e.candidate) {
         this.sendIceCandidate(e.candidate.toJSON()).catch((err) =>
           this.events.onError?.(new Error('ICE send failed: ' + err.message))
@@ -120,6 +123,13 @@ export class PeerConnection {
         async (payload) => {
           if (this.closed) return;
           const row = payload.new as ConnectionRow;
+          
+          // If the remote peer closed or changed status to ended, trigger immediate disconnection
+          if (row.status === 'ended') {
+            this.events.onDisconnected?.();
+            return;
+          }
+
           // initiator waits for answer
           if (this.isInitiator && row.sdp_answer && !this.pc.currentRemoteDescription) {
             try {
@@ -165,17 +175,47 @@ export class PeerConnection {
   }
 
   async close() {
+    if (this.closed) return;
     this.closed = true;
+
+    // 1. Remove listeners to prevent async handlers triggering during lifecycle death loop
+    this.pc.onconnectionstatechange = null;
+    this.pc.onicecandidate = null;
+    this.pc.ontrack = null;
+
+    // 2. Stop all active media tracks attached to senders
     try {
-      this.pc.getSenders().forEach((s) => s.track?.stop());
-    } catch {}
-    try { this.pc.close(); } catch {}
+      this.pc.getSenders().forEach((s) => {
+        if (s.track) {
+          s.track.stop();
+        }
+      });
+    } catch (e) {
+      console.warn('Error stopping tracks on senders:', e);
+    }
+
+    // 3. Explicitly drop the connection
+    try { 
+      this.pc.close(); 
+    } catch (e) {
+      console.warn('Error closing RTCPeerConnection:', e);
+    }
+
+    // 4. Fire status update synchronously to Supabase to free up the other side
     try {
       await supabase
         .from('connections')
         .update({ status: 'ended', ended_at: new Date().toISOString() })
         .eq('id', this.conn.id);
-    } catch {}
-    try { await supabase.channel(`conn-${this.conn.id}`).unsubscribe(); } catch {}
+    } catch (e) {
+      console.error('Error updating connections table row on teardown:', e);
+    }
+
+    // 5. Unsubscribe from real-time streaming channel
+    try { 
+      await supabase.channel(`conn-${this.conn.id}`).unsubscribe(); 
+    } catch (e) {
+      console.warn('Error unsubscribing channel:', e);
+    }
   }
 }
