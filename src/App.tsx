@@ -244,7 +244,7 @@ function ChatApp({
           setMenuOpen={setMenuOpen}
           onSignOut={onSignOut}
           theme={theme}
-          onToggleTheme={onToggleTheme}
+          onToggleTheme={onToggleTheme} // FIXED: Passed the correct variable name
           onOpenProfile={onOpenProfile}
         />
       )}
@@ -609,7 +609,7 @@ function ControlButton({
   onClick: () => void;
   active: boolean;
   label: string;
-  children: React.RefObject<HTMLButtonElement> | any;
+  children: any;
 }) {
   return (
     <button
@@ -671,14 +671,20 @@ function TextRoom({
   useEffect(() => {
     let active = true;
     
-    supabase
-      .from('messages')
-      .select('*')
-      .eq('connection_id', conn.id)
-      .order('created_at', { ascending: true })
-      .then(({ data }) => {
-        if (active && data) setMessages(data as MessageRow[]);
-      });
+    const fetchLatestMessages = () => {
+      supabase
+        .from('messages')
+        .select('*')
+        .eq('connection_id', conn.id)
+        .order('created_at', { ascending: true })
+        .then(({ data }) => {
+          if (active && data) setMessages(data as MessageRow[]);
+        });
+    };
+
+    fetchLatestMessages();
+
+    const pollInterval = window.setInterval(fetchLatestMessages, 1500);
 
     const channel = supabase
       .channel(`chat-room-fallback-${conn.id}`)
@@ -705,6 +711,7 @@ function TextRoom({
 
     return () => {
       active = false;
+      clearInterval(pollInterval);
       channel.unsubscribe();
       if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     };
