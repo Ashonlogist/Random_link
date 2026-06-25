@@ -1,12 +1,15 @@
 import type { ConnectionRow } from './supabase';
 import { supabase } from './supabase';
 
+// Reduced STUN footprint and prepared TURN entry array to satisfy strict browser NAT traversal requirements
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun2.l.google.com:19302' },
-  { urls: 'stun:stun3.l.google.com:19302' },
-  { urls: 'stun:stun4.l.google.com:19302' },
+  // OPTIONAL: Add your free TURN credentials here if mobile carrier firewalls continue to block connections:
+  // {
+  //   urls: 'turn:your-turn-server.com:3478',
+  //   username: 'your_username',
+  //   credential: 'your_password'
+  // }
 ];
 
 export type PeerEvents = {
@@ -16,11 +19,6 @@ export type PeerEvents = {
   onError?: (err: Error) => void;
 };
 
-/**
- * Manages a single WebRTC peer connection for a given connection row.
- * Signaling (offer/answer/ICE) is exchanged through the `connections` table
- * via Supabase realtime + row updates.
- */
 export class PeerConnection {
   pc: RTCPeerConnection;
   conn: ConnectionRow;
@@ -37,11 +35,15 @@ export class PeerConnection {
     this.myId = myId;
     this.isInitiator = conn.initiator_id === myId;
     this.events = events;
+    
+    console.log(`[WEBRTC DIAGNOSTIC] Spawning connection wrapper. Role: ${this.isInitiator ? 'Initiator' : 'Responder'}`);
     this.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
 
     this.pc.onconnectionstatechange = () => {
       if (this.closed) return;
       const state = this.pc.connectionState;
+      console.log(`[WEBRTC DIAGNOSTIC] Connection status shifted to: ${state}`);
+      
       if (state === 'connected') this.events.onConnected?.();
       if (state === 'disconnected' || state === 'failed' || state === 'closed') {
         this.events.onDisconnected?.();
@@ -50,6 +52,7 @@ export class PeerConnection {
 
     this.pc.ontrack = (e) => {
       if (this.closed) return;
+      console.log('[WEBRTC DIAGNOSTIC] Remote media stream tracks captured successfully.');
       this.events.onRemoteStream?.(e.streams[0]);
     };
 
@@ -57,7 +60,7 @@ export class PeerConnection {
       if (this.closed) return;
       if (e.candidate) {
         this.sendIceCandidate(e.candidate.toJSON()).catch((err) =>
-          this.events.onError?.(new Error('ICE send failed: ' + err.message))
+          console.error('[WEBRTC DIAGNOSTIC] Signaling ice exchange error:', err)
         );
       }
     };
@@ -72,20 +75,20 @@ export class PeerConnection {
     }
   }
 
-  /** Initiator: create offer, write it to the row, then wait for answer. */
   async createOffer() {
     if (!this.isInitiator) throw new Error('Only initiator creates offer');
     const offer = await this.pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
     await this.pc.setLocalDescription(offer);
+    
     const { error } = await supabase
       .from('connections')
       .update({ sdp_offer: offer })
       .eq('id', this.conn.id);
+      
     if (error) throw new Error('Failed to write offer: ' + error.message);
     await this.subscribeToConnection();
   }
 
-  /** Responder: read offer, set remote, create answer, write it. */
   async acceptOffer() {
     if (this.isInitiator) throw new Error('Only responder accepts offer');
     const { data, error } = await supabase
@@ -93,21 +96,24 @@ export class PeerConnection {
       .select('sdp_offer, ice_candidates_initiator')
       .eq('id', this.conn.id)
       .maybeSingle();
+      
     if (error) throw new Error('Failed to load offer: ' + error.message);
     if (!data?.sdp_offer) throw new Error('No offer available yet');
 
     await this.pc.setRemoteDescription(new RTCSessionDescription(data.sdp_offer));
-    // apply any ICE candidates that arrived before remote description was set
+    
     for (const c of data.ice_candidates_initiator ?? []) {
       try { await this.pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
     }
 
     const answer = await this.pc.createAnswer();
     await this.pc.setLocalDescription(answer);
+    
     const { error: e2 } = await supabase
       .from('connections')
       .update({ sdp_answer: answer, status: 'connected' })
       .eq('id', this.conn.id);
+      
     if (e2) throw new Error('Failed to write answer: ' + e2.message);
     await this.subscribeToConnection();
   }
@@ -115,6 +121,7 @@ export class PeerConnection {
   private async subscribeToConnection() {
     if (this.subscribed) return;
     this.subscribed = true;
+    
     supabase
       .channel(`conn-${this.conn.id}`)
       .on(
@@ -124,13 +131,11 @@ export class PeerConnection {
           if (this.closed) return;
           const row = payload.new as ConnectionRow;
           
-          // If the remote peer closed or changed status to ended, trigger immediate disconnection
           if (row.status === 'ended') {
             this.events.onDisconnected?.();
             return;
           }
 
-          // initiator waits for answer
           if (this.isInitiator && row.sdp_answer && !this.pc.currentRemoteDescription) {
             try {
               await this.pc.setRemoteDescription(new RTCSessionDescription(row.sdp_answer));
@@ -138,13 +143,14 @@ export class PeerConnection {
                 try { await this.pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
               }
             } catch (err: any) {
-              this.events.onError?.(new Error('Remote desc failed: ' + err.message));
+              this.events.onError?.(new Error('Remote desc assignment failed: ' + err.message));
             }
           }
-          // apply newly-arrived ICE candidates from the other party
+          
           const theirIce = this.isInitiator
             ? (row.ice_candidates_responder ?? [])
             : (row.ice_candidates_initiator ?? []);
+            
           for (const c of theirIce) {
             if (!this.pendingIce.find((x) => x.candidate === c.candidate)) {
               this.pendingIce.push(c);
@@ -158,64 +164,43 @@ export class PeerConnection {
 
   private async sendIceCandidate(candidate: any) {
     const field = this.isInitiator ? 'ice_candidates_initiator' : 'ice_candidates_responder';
-    // append to the array atomically via RPC-free read-modify-write with a retry
     const { data, error } = await supabase
       .from('connections')
       .select(field)
       .eq('id', this.conn.id)
       .maybeSingle();
+      
     if (error) throw error;
     const arr = ((data as Record<string, any> | null)?.[field] as any[]) ?? [];
     arr.push(candidate);
-    const { error: uerr } = await supabase
+    
+    await supabase
       .from('connections')
       .update({ [field]: arr })
       .eq('id', this.conn.id);
-    if (uerr) throw uerr;
   }
 
   async close() {
     if (this.closed) return;
     this.closed = true;
 
-    // 1. Remove listeners to prevent async handlers triggering during lifecycle death loop
     this.pc.onconnectionstatechange = null;
     this.pc.onicecandidate = null;
     this.pc.ontrack = null;
 
-    // 2. Stop all active media tracks attached to senders
     try {
       this.pc.getSenders().forEach((s) => {
-        if (s.track) {
-          s.track.stop();
-        }
+        if (s.track) s.track.stop();
       });
-    } catch (e) {
-      console.warn('Error stopping tracks on senders:', e);
-    }
+    } catch {}
 
-    // 3. Explicitly drop the connection
-    try { 
-      this.pc.close(); 
-    } catch (e) {
-      console.warn('Error closing RTCPeerConnection:', e);
-    }
-
-    // 4. Fire status update synchronously to Supabase to free up the other side
+    try { this.pc.close(); } catch {}
     try {
       await supabase
         .from('connections')
         .update({ status: 'ended', ended_at: new Date().toISOString() })
         .eq('id', this.conn.id);
-    } catch (e) {
-      console.error('Error updating connections table row on teardown:', e);
-    }
-
-    // 5. Unsubscribe from real-time streaming channel
-    try { 
-      await supabase.channel(`conn-${this.conn.id}`).unsubscribe(); 
-    } catch (e) {
-      console.warn('Error unsubscribing channel:', e);
-    }
+    } catch {}
+    try { await supabase.channel(`conn-${this.conn.id}`).unsubscribe(); } catch {}
   }
 }
