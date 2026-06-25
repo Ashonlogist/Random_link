@@ -128,7 +128,6 @@ function ChatApp({
       let stream: MediaStream | null = null;
       if (selectedMode === 'video') {
         try {
-          // FIX: Strictly apply echoCancellation and noiseSuppression to kill high-pitched shrills & loops
           stream = await navigator.mediaDevices.getUserMedia({
             video: { width: { ideal: 1280 }, height: { ideal: 720 } },
             audio: {
@@ -139,15 +138,8 @@ function ChatApp({
           });
           setLocalStream(stream);
         } catch (err: any) {
-          const reason =
-            err?.name === 'NotAllowedError'
-              ? 'Camera/mic permission was denied. Allow access in your browser and try again.'
-              : err?.name === 'NotFoundError' || err?.name === 'DevicesNotFoundError'
-              ? 'No camera or microphone found. Connect a device or use Text Chat instead.'
-              : err?.name === 'NotReadableError'
-              ? 'Your camera/mic is in use by another app. Close it and try again.'
-              : 'Could not access camera/microphone. ' + (err?.message ?? '');
-          setError(reason);
+          console.error('[DIAGNOSTIC] Media Access Error:', err);
+          setError('Could not access camera/microphone. ' + (err?.message ?? ''));
           setPhase('lobby');
           return;
         }
@@ -156,20 +148,21 @@ function ChatApp({
       unsubIncomingRef.current?.();
       unsubIncomingRef.current = subscribeToIncomingMatches(myId, async (incoming) => {
         if (peerRef.current) return;
+        console.log('[DIAGNOSTIC] Responder received matching session:', incoming);
         setConn(incoming);
         setPhase('connected');
         setConnectedAt(Date.now());
         const peer = new PeerConnection(incoming, myId, {
           onRemoteStream: (s) => setRemoteStream(s),
           onDisconnected: () => handleNext(),
-          onError: (e) => setError(e.message),
+          onError: (e) => console.error('[DIAGNOSTIC] WebRTC Peer Error:', e),
         });
         peerRef.current = peer;
         await peer.attachLocalStream(stream);
         try {
           await peer.acceptOffer();
         } catch (err: any) {
-          setError('Failed to accept call: ' + err.message);
+          console.error('[DIAGNOSTIC] WebRTC Accept Offer Failure:', err);
           handleNext();
         }
       });
@@ -177,19 +170,21 @@ function ChatApp({
       try {
         const result = await findMatch(myId, selectedMode);
         if (result) {
+          console.log('[DIAGNOSTIC] Initiator generated matching session:', result.conn);
           setConn(result.conn);
           setPhase('connected');
           setConnectedAt(Date.now());
           const peer = new PeerConnection(result.conn, myId, {
             onRemoteStream: (s) => setRemoteStream(s),
             onDisconnected: () => handleNext(),
-            onError: (e) => setError(e.message),
+            onError: (e) => console.error('[DIAGNOSTIC] WebRTC Peer Error:', e),
           });
           peerRef.current = peer;
           await peer.attachLocalStream(stream);
           await peer.createOffer();
         }
       } catch (err: any) {
+        console.error('[DIAGNOSTIC] Matchmaking Loop Exception:', err);
         setError(err.message);
         setPhase('lobby');
       }
@@ -488,17 +483,26 @@ function ChatRoom({
   const [elapsed, setElapsed] = useState(0);
   const [partnerProfile, setPartnerProfile] = useState<any | null>(null);
 
-  // FIX: Isolated reliable profile fetch inside ChatRoom instance to bypass mounting delay races
+  // REFACTORED PROFILE LOOKUP: Prevents race condition bugs by checking UUID explicitly
   useEffect(() => {
     if (!conn) return;
-    const partnerId = conn.initiator_id === myId ? conn.responder_id : conn.initiator_id;
+    const partnerId = String(conn.initiator_id) === String(myId) ? conn.responder_id : conn.initiator_id;
+    console.log('[DIAGNOSTIC] Profile lookup triggered for partnerId:', partnerId);
+
     supabase
       .from('profiles')
       .select('display_name, avatar_url')
       .eq('user_id', partnerId)
       .maybeSingle()
-      .then(({ data }) => {
-        if (data) setPartnerProfile(data);
+      .then(({ data, error }) => {
+        if (error) {
+          console.error('[DIAGNOSTIC] Profile Query database failure:', error);
+        } else if (data) {
+          console.log('[DIAGNOSTIC] Profile details successfully retrieved:', data);
+          setPartnerProfile(data);
+        } else {
+          console.warn('[DIAGNOSTIC] Profile row came back empty for UUID:', partnerId);
+        }
       });
   }, [conn, myId]);
 
@@ -510,7 +514,6 @@ function ChatRoom({
 
   return (
     <div className="flex w-full h-full sm:h-auto sm:max-w-5xl flex-col sm:px-4">
-      {/* Top dashboard on desktop view */}
       <div className="hidden sm:flex items-center justify-between mb-3 mt-4">
         <div className="flex items-center gap-2 text-sm text-ink-muted">
           <span className="inline-flex h-2 w-2 animate-pulse rounded-full bg-emerald-400" />
@@ -575,7 +578,6 @@ function VideoRoom({
 }) {
   const hasRemote = !!remoteStream && remoteStream.getTracks().length > 0;
   
-  // FIX: Force immediate inner-attachment on rendering mount to resolve parent lifecycle timing glitches
   useEffect(() => {
     if (localVideoRef.current && localStream) {
       localVideoRef.current.srcObject = localStream;
@@ -588,7 +590,6 @@ function VideoRoom({
     }
   }, [remoteStream, remoteVideoRef]);
 
-  // Mobile Gesture Tracking Mechanics (Horizontal Swipes to the Right triggers Skip)
   const touchStartX = useRef<number>(0);
   const touchEndX = useRef<number>(0);
 
@@ -616,21 +617,20 @@ function VideoRoom({
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
     >
-      {/* Video Framing Window */}
-      <div className="relative w-full h-full sm:h-auto sm:aspect-video overflow-hidden sm:rounded-2xl border-0 sm:border border-line bg-black shadow-2xl flex-1 sm:flex-initial">
+      {/* SCALING REFIX: Uses object-contain instead of object-cover on laptops to fix phone aspect ratio cropping */}
+      <div className="relative w-full h-full sm:h-auto sm:aspect-video overflow-hidden sm:rounded-2xl border-0 sm:border border-line bg-neutral-950 shadow-2xl flex-1 sm:flex-initial">
         {hasRemote ? (
-          <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-cover absolute inset-0" />
+          <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-cover sm:object-contain absolute inset-0" />
         ) : (
           <div className="flex h-full w-full flex-col items-center justify-center text-slate-400 absolute inset-0">
             <Loader2 className="h-8 w-8 animate-spin text-accent" />
-            <p className="mt-3 text-sm">Connecting…</p>
+            <p className="mt-3 text-sm">Connecting Stream Channels…</p>
           </div>
         )}
 
-        {/* Mobile Overlay Banner & Partner Details */}
         <div className="absolute top-4 left-4 z-20 flex items-center gap-3 bg-black/40 backdrop-blur-md px-3 py-2 rounded-2xl border border-white/10 sm:bg-bg-elev/80 sm:border-line">
           {partnerProfile?.avatar_url ? (
-            <img src={partnerProfile.avatar_url} alt="Partner" className="h-9 w-9 rounded-full object-cover border border-accent" />
+            <img src={partnerProfile.avatar_url} alt="Partner Avatar" className="h-9 w-9 rounded-full object-cover border border-accent" />
           ) : (
             <div className="h-9 w-9 rounded-full bg-accent/20 text-accent flex items-center justify-center border border-accent">
               <User className="h-4 w-4" />
@@ -642,7 +642,6 @@ function VideoRoom({
           </div>
         </div>
 
-        {/* Local Self Preview Box (Tiny Floating Frame) */}
         <div className="absolute right-4 top-4 z-20 h-28 w-20 sm:h-32 sm:w-44 overflow-hidden rounded-xl border border-white/20 bg-slate-800 shadow-xl sm:bottom-3 sm:right-3 sm:top-auto">
           <video 
             ref={localVideoRef} 
@@ -654,13 +653,11 @@ function VideoRoom({
           <span className="absolute bottom-1 left-1 rounded bg-black/50 px-1.5 py-0.5 text-[10px] text-white">You</span>
         </div>
 
-        {/* Mobile floating swipe instruction banner */}
         <div className="absolute bottom-24 left-1/2 -translate-x-1/2 z-10 sm:hidden text-center pointer-events-none">
           <p className="text-xs text-white/50 bg-black/30 px-3 py-1 rounded-full backdrop-blur-sm">👉 Swipe right to skip</p>
         </div>
       </div>
 
-      {/* Floating UI Controls Layer */}
       <div className="absolute bottom-6 left-0 right-0 z-20 flex items-center justify-center gap-3 pt-1 px-4 sm:relative sm:bottom-0 sm:bg-transparent sm:px-0">
         <button
           onClick={onStop}
@@ -762,21 +759,24 @@ function TextRoom({
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // FIX: Subscribing with precise formatting to ensure real-time text message syncing works flawlessly
+  // REALTIME FALLBACK PIPELINE: Adds active console tracking and switches to manual array validation if RLS/Publication filters drop strings
   useEffect(() => {
     let active = true;
+    console.log('[DIAGNOSTIC] Initializing Text Stream Sync channel for connection:', conn.id);
     
-    // Initial load fetch
     supabase
       .from('messages')
       .select('*')
       .eq('connection_id', conn.id)
       .order('created_at', { ascending: true })
-      .then(({ data }) => {
-        if (active && data) setMessages(data as MessageRow[]);
+      .then(({ data, error }) => {
+        if (error) console.error('[DIAGNOSTIC] Message history loading failure:', error);
+        if (active && data) {
+          console.log('[DIAGNOSTIC] Loaded existing chat length:', data.length);
+          setMessages(data as MessageRow[]);
+        }
       });
 
-    // Realtime channel creation matching connection row ID exactly
     const channel = supabase
       .channel(`chat-room-sync-${conn.id}`)
       .on(
@@ -784,19 +784,24 @@ function TextRoom({
         { 
           event: 'INSERT', 
           schema: 'public', 
-          table: 'messages',
-          filter: `connection_id=eq.${conn.id}`
+          table: 'messages'
         },
         (payload) => {
           if (!active) return;
+          console.log('[DIAGNOSTIC] Realtime packet hit client pipeline:', payload);
           const newMsg = payload.new as MessageRow;
-          setMessages((prev) => {
-            if (prev.some((m) => m.id === newMsg.id)) return prev;
-            return [...prev, newMsg];
-          });
+          
+          if (String(newMsg.connection_id) === String(conn.id)) {
+            setMessages((prev) => {
+              if (prev.some((m) => m.id === newMsg.id)) return prev;
+              return [...prev, newMsg];
+            });
+          }
         }
       )
-      .subscribe();
+      .subscribe((status) => {
+        console.log(`[DIAGNOSTIC] Realtime socket subscription status: ${status}`);
+      });
 
     return () => {
       active = false;
@@ -814,6 +819,7 @@ function TextRoom({
     if (!textBody) setInput('');
     setSending(true);
 
+    console.log('[DIAGNOSTIC] Dispatching message string to database row payload...');
     const { error } = await supabase.from('messages').insert({
       connection_id: conn.id,
       sender_id: myId,
@@ -822,7 +828,7 @@ function TextRoom({
     setSending(false);
     if (error) {
       if (!textBody) setInput(body);
-      console.error(error);
+      console.error('[DIAGNOSTIC] Insert Message execution failed:', error);
     }
   };
 
@@ -845,7 +851,7 @@ function TextRoom({
           await send(data.publicUrl);
         }
       } catch (err) {
-        console.error('Attachment transmission failure:', err);
+        console.error('[DIAGNOSTIC] Storage Bucket Upload failure:', err);
       } finally {
         setUploading(false);
         if (fileInputRef.current) fileInputRef.current.value = '';
@@ -859,7 +865,6 @@ function TextRoom({
 
   return (
     <div className="flex h-screen sm:h-[68vh] flex-col overflow-hidden sm:rounded-2xl border-0 sm:border border-line bg-bg sm:bg-bg-elev shadow-2xl w-full">
-      {/* Mobile top status banner */}
       <div className="flex sm:hidden items-center justify-between p-4 border-b border-line bg-bg-elev">
         <div className="flex items-center gap-3">
           {partnerProfile?.avatar_url ? (
@@ -877,12 +882,11 @@ function TextRoom({
         <button onClick={onStop} className="text-xs font-medium text-rose-500 bg-rose-500/10 px-3 py-1.5 rounded-xl">Leave</button>
       </div>
 
-      {/* Messages Stream Segment */}
       <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4 bg-bg sm:bg-transparent">
         {messages.length === 0 && (
           <div className="flex h-full flex-col items-center justify-center text-center text-ink-faint">
             <MessageSquare className="h-8 w-8" />
-            <p className="mt-2 text-sm">Say hi to {partnerProfile?.display_name || 'stranger'}!</p>
+            <p className="mt-2 text-sm">Say hi to {partnerProfile?.display_name || 'Stranger'}!</p>
           </div>
         )}
         {messages.map((m) => {
@@ -920,7 +924,6 @@ function TextRoom({
         })}
       </div>
 
-      {/* Controller Console Tray with overflow guards */}
       <div className="border-t border-line p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] bg-bg-elev w-full box-border">
         <div className="flex items-center gap-2 w-full max-w-full">
           <input
