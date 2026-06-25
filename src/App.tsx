@@ -148,7 +148,6 @@ function ChatApp({
       unsubIncomingRef.current?.();
       unsubIncomingRef.current = subscribeToIncomingMatches(myId, async (incoming) => {
         if (peerRef.current) return;
-        console.log('[DIAGNOSTIC] Responder received matching session:', incoming);
         setConn(incoming);
         setPhase('connected');
         setConnectedAt(Date.now());
@@ -162,7 +161,6 @@ function ChatApp({
         try {
           await peer.acceptOffer();
         } catch (err: any) {
-          console.error('[DIAGNOSTIC] WebRTC Accept Offer Failure:', err);
           handleNext();
         }
       });
@@ -170,7 +168,6 @@ function ChatApp({
       try {
         const result = await findMatch(myId, selectedMode);
         if (result) {
-          console.log('[DIAGNOSTIC] Initiator generated matching session:', result.conn);
           setConn(result.conn);
           setPhase('connected');
           setConnectedAt(Date.now());
@@ -184,7 +181,6 @@ function ChatApp({
           await peer.createOffer();
         }
       } catch (err: any) {
-        console.error('[DIAGNOSTIC] Matchmaking Loop Exception:', err);
         setError(err.message);
         setPhase('lobby');
       }
@@ -483,25 +479,27 @@ function ChatRoom({
   const [elapsed, setElapsed] = useState(0);
   const [partnerProfile, setPartnerProfile] = useState<any | null>(null);
 
-  // REFACTORED PROFILE LOOKUP: Prevents race condition bugs by checking UUID explicitly
   useEffect(() => {
     if (!conn) return;
     const partnerId = String(conn.initiator_id) === String(myId) ? conn.responder_id : conn.initiator_id;
-    console.log('[DIAGNOSTIC] Profile lookup triggered for partnerId:', partnerId);
 
     supabase
       .from('profiles')
-      .select('display_name, avatar_url')
+      .select('*')
       .eq('user_id', partnerId)
       .maybeSingle()
       .then(({ data, error }) => {
         if (error) {
-          console.error('[DIAGNOSTIC] Profile Query database failure:', error);
+          supabase
+            .from('profiles')
+            .select('display_name')
+            .eq('user_id', partnerId)
+            .maybeSingle()
+            .then(({ data: backupData }) => {
+              if (backupData) setPartnerProfile(backupData);
+            });
         } else if (data) {
-          console.log('[DIAGNOSTIC] Profile details successfully retrieved:', data);
           setPartnerProfile(data);
-        } else {
-          console.warn('[DIAGNOSTIC] Profile row came back empty for UUID:', partnerId);
         }
       });
   }, [conn, myId]);
@@ -617,7 +615,6 @@ function VideoRoom({
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
     >
-      {/* SCALING REFIX: Uses object-contain instead of object-cover on laptops to fix phone aspect ratio cropping */}
       <div className="relative w-full h-full sm:h-auto sm:aspect-video overflow-hidden sm:rounded-2xl border-0 sm:border border-line bg-neutral-950 shadow-2xl flex-1 sm:flex-initial">
         {hasRemote ? (
           <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-cover sm:object-contain absolute inset-0" />
@@ -672,7 +669,7 @@ function VideoRoom({
         </ControlButton>
         
         <ControlButton onClick={onToggleMic} active={micOn} label={micOn ? 'Mic on' : 'Mic off'}>
-          <MicIcon on={micOn} />
+          <MicIcon safeOn={micOn} />
         </ControlButton>
 
         <button
@@ -713,8 +710,8 @@ function ControlButton({
   );
 }
 
-function MicIcon({ on }: { on: boolean }) {
-  return on ? <MicOnIcon /> : <MicOffIcon />;
+function MicIcon({ safeOn }: { safeOn: boolean }) {
+  return safeOn ? <MicOnIcon /> : <MicOffIcon />;
 }
 function MicOnIcon() {
   return (
@@ -759,26 +756,22 @@ function TextRoom({
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // REALTIME FALLBACK PIPELINE: Adds active console tracking and switches to manual array validation if RLS/Publication filters drop strings
   useEffect(() => {
     let active = true;
-    console.log('[DIAGNOSTIC] Initializing Text Stream Sync channel for connection:', conn.id);
     
     supabase
       .from('messages')
       .select('*')
       .eq('connection_id', conn.id)
       .order('created_at', { ascending: true })
-      .then(({ data, error }) => {
-        if (error) console.error('[DIAGNOSTIC] Message history loading failure:', error);
+      .then(({ data }) => {
         if (active && data) {
-          console.log('[DIAGNOSTIC] Loaded existing chat length:', data.length);
           setMessages(data as MessageRow[]);
         }
       });
 
     const channel = supabase
-      .channel(`chat-room-sync-${conn.id}`)
+      .channel(`chat-room-fallback-${conn.id}`)
       .on(
         'postgres_changes',
         { 
@@ -788,9 +781,7 @@ function TextRoom({
         },
         (payload) => {
           if (!active) return;
-          console.log('[DIAGNOSTIC] Realtime packet hit client pipeline:', payload);
           const newMsg = payload.new as MessageRow;
-          
           if (String(newMsg.connection_id) === String(conn.id)) {
             setMessages((prev) => {
               if (prev.some((m) => m.id === newMsg.id)) return prev;
@@ -799,9 +790,7 @@ function TextRoom({
           }
         }
       )
-      .subscribe((status) => {
-        console.log(`[DIAGNOSTIC] Realtime socket subscription status: ${status}`);
-      });
+      .subscribe();
 
     return () => {
       active = false;
@@ -819,7 +808,6 @@ function TextRoom({
     if (!textBody) setInput('');
     setSending(true);
 
-    console.log('[DIAGNOSTIC] Dispatching message string to database row payload...');
     const { error } = await supabase.from('messages').insert({
       connection_id: conn.id,
       sender_id: myId,
@@ -828,7 +816,7 @@ function TextRoom({
     setSending(false);
     if (error) {
       if (!textBody) setInput(body);
-      console.error('[DIAGNOSTIC] Insert Message execution failed:', error);
+      console.error(error);
     }
   };
 
@@ -851,7 +839,7 @@ function TextRoom({
           await send(data.publicUrl);
         }
       } catch (err) {
-        console.error('[DIAGNOSTIC] Storage Bucket Upload failure:', err);
+        console.error(err);
       } finally {
         setUploading(false);
         if (fileInputRef.current) fileInputRef.current.value = '';
