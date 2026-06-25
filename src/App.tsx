@@ -758,11 +758,11 @@ function TextRoom({
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Unified Postgres Real-Time Change subscription handler
+  // Safe table change handler to fix real-time texting sync reliably
   useEffect(() => {
     let active = true;
     
-    // Initial population fetch
+    // Initial fetch
     supabase
       .from('messages')
       .select('*')
@@ -772,19 +772,21 @@ function TextRoom({
         if (active && data) setMessages(data as MessageRow[]);
       });
 
-    // Realtime channel creation
+    // Realtime changes listener
     const channel = supabase
-      .channel(`msgs-${conn.id}`)
+      .channel(`public-messages-${conn.id}`)
       .on(
         'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'messages', filter: `connection_id=eq.${conn.id}` },
+        { event: 'INSERT', schema: 'public', table: 'messages' },
         (payload) => {
           if (!active) return;
           const newMsg = payload.new as MessageRow;
-          setMessages((prev) => {
-            if (prev.some((m) => m.id === newMsg.id)) return prev;
-            return [...prev, newMsg];
-          });
+          if (newMsg.connection_id === conn.id) {
+            setMessages((prev) => {
+              if (prev.some((m) => m.id === newMsg.id)) return prev;
+              return [...prev, newMsg];
+            });
+          }
         }
       )
       .subscribe();
@@ -817,7 +819,6 @@ function TextRoom({
     }
   };
 
-  // Multi-media File Picker & Storage Bucket uploader
   const handleAttachmentPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
@@ -851,7 +852,7 @@ function TextRoom({
 
   return (
     <div className="flex h-screen sm:h-[68vh] flex-col overflow-hidden sm:rounded-2xl border-0 sm:border border-line bg-bg sm:bg-bg-elev shadow-2xl w-full">
-      {/* Mobile-first top matching status banner */}
+      {/* Mobile top status banner */}
       <div className="flex sm:hidden items-center justify-between p-4 border-b border-line bg-bg-elev">
         <div className="flex items-center gap-3">
           {partnerProfile?.avatar_url ? (
@@ -912,9 +913,9 @@ function TextRoom({
         })}
       </div>
 
-      {/* Controller Messaging Console Tray */}
-      <div className="border-t border-line p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] bg-bg-elev">
-        <div className="flex items-center gap-2">
+      {/* Controller Console Tray with overflow guards */}
+      <div className="border-t border-line p-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] bg-bg-elev w-full box-border">
+        <div className="flex items-center gap-2 w-full max-w-full">
           <input
             type="file"
             ref={fileInputRef}
@@ -940,7 +941,7 @@ function TextRoom({
               }
             }}
             placeholder="Type a message…"
-            className="flex-1 rounded-xl border border-line bg-bg px-4 py-3 text-ink placeholder-ink-faint focus:border-accent/50 focus:outline-none focus:ring-1 focus:ring-accent/50"
+            className="flex-1 min-w-0 rounded-xl border border-line bg-bg px-4 py-3 text-ink placeholder-ink-faint focus:border-accent/50 focus:outline-none focus:ring-1 focus:ring-accent/50"
           />
           <button
             onClick={() => send()}
