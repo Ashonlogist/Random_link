@@ -609,7 +609,7 @@ function ControlButton({
   onClick: () => void;
   active: boolean;
   label: string;
-  children: React.ReactNode;
+  children: React.RefObject<HTMLButtonElement> | any;
 }) {
   return (
     <button
@@ -894,45 +894,48 @@ function EditProfileModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
       <div className="w-full max-w-sm rounded-2xl border border-line bg-bg-elev p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-bold">Profile Settings</h3>
-          <button onClick={onClose} className="text-ink-muted hover:text-ink"><X className="h-5 w-5" /></button>
-        </div>
-
-        <div className="flex flex-col items-center gap-3 py-2">
-          <input type="file" ref={fileRef} onChange={handleAvatarChange} accept="image/*" className="hidden" />
-          <button 
-            onClick={() => fileRef.current?.click()}
-            className="group relative flex h-24 w-24 items-center justify-center overflow-hidden rounded-full border border-dashed border-line bg-bg"
-          >
-            {profile.avatar_url ? (
-              <img src={profile.avatar_url} alt="Avatar" className="h-full w-full object-cover" />
-            ) : (
-              <User className="h-8 w-8 text-ink-faint" />
-            )}
-            <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition text-white">
-              {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Edit className="h-4 w-4" />}
-            </div>
-          </button>
-        </div>
-
-        <div className="space-y-4 mt-2">
-          <div>
-            <label className="text-xs font-semibold text-ink-muted block mb-1">Display Name</label>
-            <input 
-              value={name} 
-              onChange={(e) => setName(e.target.value)}
-              className="w-full rounded-xl border border-line bg-bg px-4 py-2.5 text-sm"
-            />
+        <div className="fixed inset-0" onClick={onClose} />
+        <div className="relative z-10">
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-bold">Profile Settings</h3>
+            <button onClick={onClose} className="text-ink-muted hover:text-ink"><X className="h-5 w-5" /></button>
           </div>
 
-          <button
-            onClick={handleUpdate}
-            disabled={saving || !name.trim()}
-            className="w-full rounded-xl bg-accent py-2.5 text-sm font-semibold text-white shadow-lg transition active:scale-95 disabled:opacity-50"
-          >
-            {saving ? <Loader2 className="h-4 w-4 animate-spin mx-auto" /> : 'Save Modifications'}
-          </button>
+          <div className="flex flex-col items-center gap-3 py-2">
+            <input type="file" ref={fileRef} onChange={handleAvatarChange} accept="image/*" className="hidden" />
+            <button 
+              onClick={() => fileRef.current?.click()}
+              className="group relative flex h-24 w-24 items-center justify-center overflow-hidden rounded-full border border-dashed border-line bg-bg"
+            >
+              {profile.avatar_url ? (
+                <img src={profile.avatar_url} alt="Avatar" className="h-full w-full object-cover" />
+              ) : (
+                <User className="h-8 w-8 text-ink-faint" />
+              )}
+              <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition text-white">
+                {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Edit className="h-4 w-4" />}
+              </div>
+            </button>
+          </div>
+
+          <div className="space-y-4 mt-2">
+            <div>
+              <label className="text-xs font-semibold text-ink-muted block mb-1">Display Name</label>
+              <input 
+                value={name} 
+                onChange={(e) => setName(e.target.value)}
+                className="w-full rounded-xl border border-line bg-bg px-4 py-2.5 text-sm"
+              />
+            </div>
+
+            <button
+              onClick={handleUpdate}
+              disabled={saving || !name.trim()}
+              className="w-full rounded-xl bg-accent py-2.5 text-sm font-semibold text-white shadow-lg transition active:scale-95 disabled:opacity-50"
+            >
+              {saving ? <Loader2 className="h-4 w-4 animate-spin mx-auto" /> : 'Save Modifications'}
+            </button>
+          </div>
         </div>
       </div>
     </div>
