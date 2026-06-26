@@ -7,8 +7,8 @@ self.addEventListener('notificationclick', function(event) {
   const { connectionId, myId, partnerId, friendshipId } = notificationData;
 
   // Supabase REST Configurations (Replace with your actual keys)
-  const supabaseUrl = "https://YOUR_SUPABASE_PROJECT_ID.supabase.co";
-  const supabaseKey = "YOUR_SUPABASE_ANON_KEY";
+  const supabaseUrl = "https://qqutsylqpkgghmehndjm.supabase.co";
+  const supabaseKey = "sb_publishable_PaZX8ccAVYRQvlYSgd8p2A_0P2k9VTS";
 
   const headers = {
     'apikey': supabaseKey,
