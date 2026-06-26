@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Video, MessageSquare, Shuffle, X, Send, Loader2, Camera, ArrowLeft, Sparkles, LogOut, Sun, Moon, Menu, Paperclip, User, Edit, UserPlus, Check, CornerUpLeft } from 'lucide-react';
+import { Video, MessageSquare, Shuffle, X, Send, Loader2, Camera, ArrowLeft, Sparkles, LogOut, Sun, Moon, Menu, Paperclip, Download, User, Edit, UserPlus, Check, CornerUpLeft, PhoneCall, PhoneOff } from 'lucide-react';
 import { supabase, type ChatMode, type ConnectionRow, type MessageRow, type Profile } from './lib/supabase';
 import { PeerConnection } from './lib/webrtc';
 import {
@@ -29,12 +29,11 @@ export default function App() {
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [friendsDrawerOpen, setFriendsDrawerOpen] = useState(false);
 
-  // Register the background Service Worker for handling offline push logic
   useEffect(() => {
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js')
-        .then(() => console.log('[ServiceWorker] Active & Registered'))
-        .catch(err => console.error('[ServiceWorker] Registration failed:', err));
+      navigator.serviceWorker.register('/sw.js', { scope: '/' })
+        .then(() => console.log('[SW] Service worker active'))
+        .catch(err => console.error('[SW Error] Registration failed:', err));
     }
   }, []);
 
@@ -113,6 +112,8 @@ function ChatApp({
   const [micOn, setMicOn] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
+  const [incomingInvitation, setIncomingInvitation] = useState<ConnectionRow | null>(null);
+  const [inviterProfile, setInviterProfile] = useState<any | null>(null);
 
   const peerRef = useRef<PeerConnection | null>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
@@ -135,53 +136,109 @@ function ChatApp({
     return () => { if (pruneTimerRef.current) clearInterval(pruneTimerRef.current); };
   }, []);
 
-  // Listen live to dynamic realtime updates on arriving friend requests
+  // Live background hook tracking arriving peer friendship request modifications
   useEffect(() => {
-    const channel = supabase.channel(`friendships_alerts_${myId}`)
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'friendships', filter: `friend_id=eq.${myId}` },
-        async (payload) => {
+    const friendChannel = supabase.channel('live_friendships_requests')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'friendships', filter: `friend_id=eq.${myId}` }, async (payload) => {
+        if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+          const { data: sender } = await supabase.from('profiles').select('display_name, avatar_url').eq('user_id', payload.new.user_id).maybeSingle();
+          const registration = await navigator.serviceWorker.ready;
+          registration.showNotification("Friend Request Received 🤝", {
+            body: `${sender?.display_name || 'Someone'} wants to add you as a friend!`,
+            icon: sender?.avatar_url || undefined,
+            tag: payload.new.id,
+            data: { friendshipId: payload.new.id },
+            actions: [
+              { action: 'friend_accept', title: 'Accept Request' },
+              { action: 'friend_dismiss', title: 'Dismiss' }
+            ]
+          });
+        }
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(friendChannel); };
+  }, [myId]);
+
+  // Live direct background call routing handler to solve loading panel lockups
+  useEffect(() => {
+    const channel = supabase.channel(`direct_calls_${myId}`)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'connections', filter: `responder_id=eq.${myId}` }, async (payload) => {
+        const incomingCall = payload.new as ConnectionRow;
+        if (incomingCall.status === 'pending') {
+          setIncomingInvitation(incomingCall);
+          const { data } = await supabase.from('profiles').select('*').eq('user_id', incomingCall.initiator_id).maybeSingle();
+          if (data) setInviterProfile(data);
+
           if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
-            const { data: sender } = await supabase.from('profiles').select('display_name, avatar_url').eq('user_id', payload.new.user_id).maybeSingle();
-            
-            navigator.serviceWorker.ready.then((reg) => {
-              reg.showNotification("Friend Request Received 🤝", {
-                body: `${sender?.display_name || 'Someone'} wants to add you as a friend!`,
-                icon: sender?.avatar_url || undefined,
-                tag: payload.new.id,
-                data: { friendshipId: payload.new.id },
-                actions: [
-                  { action: 'friend_accept', title: 'Accept Request' },
-                  { action: 'friend_dismiss', title: 'Dismiss' }
-                ]
-              });
+            const registration = await navigator.serviceWorker.ready;
+            registration.showNotification(`Incoming ${incomingCall.mode} Call 📞`, {
+              body: `${data?.display_name || 'A friend'} is calling you!`,
+              tag: incomingCall.id,
+              renotify: true,
+              data: { connectionId: incomingCall.id }
             });
           }
         }
-      )
+      })
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
   }, [myId]);
 
+  const acceptIncomingCall = async () => {
+    if (!incomingInvitation) return;
+    const directMode = incomingInvitation.mode;
+    setMode(directMode);
+    setPhase('searching');
+    setConn(incomingInvitation);
+
+    let stream: MediaStream | null = null;
+    if (directMode === 'video') {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: { echoCancellation: true, noiseSuppression: true },
+        });
+        setLocalStream(stream);
+      } catch (err) {
+        console.error("Media feed tracking failure:", err);
+      }
+    }
+
+    setPhase('connected');
+    setConnectedAt(Date.now());
+    const peer = new PeerConnection(incomingInvitation, myId, {
+      onRemoteStream: (s) => setRemoteStream(s),
+      onDisconnected: () => handleStop(),
+      onError: (e) => console.error(e),
+    });
+    peerRef.current = peer;
+    await peer.attachLocalStream(stream);
+    await peer.acceptOffer();
+    setIncomingInvitation(null);
+  };
+
+  const rejectIncomingCall = async () => {
+    if (!incomingInvitation) return;
+    await supabase.from('connections').update({ status: 'ended' }).eq('id', incomingInvitation.id);
+    setIncomingInvitation(null);
+  };
+
   const pushMatchNotification = useCallback(async (incoming: ConnectionRow) => {
     if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
       const partnerId = incoming.initiator_id === myId ? incoming.responder_id : incoming.initiator_id;
       const { data: partner } = await supabase.from('profiles').select('display_name, avatar_url').eq('user_id', partnerId).maybeSingle();
-
-      navigator.serviceWorker.ready.then((reg) => {
-        reg.showNotification("Match Secured! 🎉", {
-          body: `We paired you with ${partner?.display_name || 'a stranger'}. Ready to chat?`,
-          icon: partner?.avatar_url || undefined,
-          tag: incoming.id,
-          renotify: true,
-          data: { connectionId: incoming.id },
-          actions: [
-            { action: 'chat_accept', title: 'Open Chat' },
-            { action: 'chat_ignore', title: 'Ignore' }
-          ]
-        });
+      const registration = await navigator.serviceWorker.ready;
+      registration.showNotification("Match Secured! 🎉", {
+        body: `We paired you with ${partner?.display_name || 'a stranger'}. Ready to chat?`,
+        icon: partner?.avatar_url || undefined,
+        tag: incoming.id,
+        data: { connectionId: incoming.id },
+        actions: [
+          { action: 'chat_accept', title: 'Open Chat' },
+          { action: 'chat_ignore', title: 'Ignore' }
+        ]
       });
     }
   }, [myId]);
@@ -300,7 +357,7 @@ function ChatApp({
           audio: { echoCancellation: true, noiseSuppression: true },
         });
         setLocalStream(stream);
-      } catch (err: any) {
+      } catch (err) {
         setError('Media devices failed.');
         setPhase('lobby');
         return;
@@ -353,7 +410,7 @@ function ChatApp({
     peerRef.current = peer;
     await peer.attachLocalStream(stream);
     await peer.createOffer();
-  }, [myId, setFriendsDrawerOpen]);
+  }, [myId]);
 
   const handleNext = useCallback(async () => {
     await teardownPeer();
@@ -377,20 +434,6 @@ function ChatApp({
     setError(null);
   }, [myId, teardownPeer, stopLocalStream]);
 
-  const toggleCam = useCallback(() => {
-    if (!localStream) return;
-    const newCam = !camOn;
-    localStream.getVideoTracks().forEach((t) => (t.enabled = newCam));
-    setCamOn(newCam);
-  }, [localStream, camOn]);
-
-  const toggleMic = useCallback(() => {
-    if (!localStream) return;
-    const newMic = !micOn;
-    localStream.getAudioTracks().forEach((t) => (t.enabled = newMic));
-    setMicOn(newMic);
-  }, [localStream, micOn]);
-
   return (
     <div className="flex min-h-screen flex-col bg-bg text-ink overflow-x-hidden relative">
       {phase !== 'connected' && (
@@ -399,6 +442,20 @@ function ChatApp({
           onOpenProfile={onOpenProfile}
           onToggleDrawer={() => setFriendsDrawerOpen(!friendsDrawerOpen)}
         />
+      )}
+
+      {incomingInvitation && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-md z-50 flex items-center justify-center p-4">
+          <div className="bg-bg-elev border border-line rounded-2xl p-6 w-full max-w-sm text-center shadow-2xl animate-in zoom-in-95">
+            <PhoneCall className="h-12 w-12 text-accent mx-auto animate-pulse mb-3" />
+            <h3 className="text-lg font-bold">{inviterProfile?.display_name || 'A Friend'}</h3>
+            <p className="text-sm text-ink-muted mb-6">Is calling you for a direct {incomingInvitation.mode} chat!</p>
+            <div className="flex gap-3">
+              <button onClick={rejectIncomingCall} className="flex-1 py-3 rounded-xl border border-line text-rose-500 font-semibold flex items-center justify-center gap-1"><PhoneOff className="h-4 w-4"/> Decline</button>
+              <button onClick={acceptIncomingCall} className="flex-1 py-3 rounded-xl bg-accent text-white font-semibold flex items-center justify-center gap-1"><Video className="h-4 w-4"/> Answer</button>
+            </div>
+          </div>
+        </div>
       )}
       
       <main className={`flex flex-1 flex-col items-center justify-center ${phase === 'connected' ? 'p-0 w-full h-screen' : 'px-4 py-6 pb-[calc(1.5rem+env(safe-area-inset-bottom))]'}`}>
@@ -445,23 +502,9 @@ function Header({
   onOpenProfile: () => void;
   onToggleDrawer: () => void;
 }) {
-  const [permission, setPermission] = useState<NotificationPermission>('default');
-
-  useEffect(() => {
-    if ('Notification' in window) {
-      setPermission(Notification.permission);
-    }
-  }, []);
-
-  const requestPermissionStatus = async () => {
-    if (!('Notification' in window)) return;
-    try {
-      const res = await Notification.requestPermission();
-      setPermission(res);
-    } catch (err) {
-      console.error("Permission request failed", err);
-    }
-  };
+  const [perm, setPerm] = useState<NotificationPermission>('default');
+  useEffect(() => { if ('Notification' in window) setPerm(Notification.permission); }, []);
+  const enableAlerts = async () => { if ('Notification' in window) setPerm(await Notification.requestPermission()); };
 
   return (
     <header className="sticky top-0 z-30 w-full border-b border-line bg-bg/80 backdrop-blur-lg">
@@ -474,22 +517,14 @@ function Header({
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Notification Permission Indicator Bell Trigger */}
-          { 'Notification' in window && (
-            <button
-              onClick={requestPermissionStatus}
-              className={`flex h-9 px-3 items-center gap-1.5 rounded-xl border text-xs font-semibold transition ${
-                permission === 'granted' 
-                  ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-600' 
-                  : 'border-line bg-bg-elev text-ink-muted hover:text-ink'
+          {'Notification' in window && (
+            <button 
+              onClick={enableAlerts} 
+              className={`h-9 px-3 text-xs font-semibold rounded-xl border transition ${
+                perm === 'granted' ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-600' : 'border-line bg-bg-elev text-ink-muted'
               }`}
-              title="Notification Status"
             >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-4 w-4">
-                <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" />
-                <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" />
-              </svg>
-              {permission === 'granted' ? 'Alerts On' : 'Enable Alerts'}
+              {perm === 'granted' ? 'Alerts Enabled' : 'Turn On Alerts'}
             </button>
           )}
 
@@ -605,7 +640,7 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
           ) : friends.length === 0 ? (
             <div className="text-center text-ink-faint py-10">
               <User className="h-8 w-8 mx-auto opacity-40 mb-2"/>
-              <p className="text-sm">No connected friends yet. Add strangers during chat to build your friend list!</p>
+              <p className="text-sm">No connected friends yet. Add strangers during chat to build your list!</p>
             </div>
           ) : (
             friends.map(f => (
@@ -619,8 +654,8 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
                   <span className="text-sm font-semibold tracking-tight">{f.display_name}</span>
                 </div>
                 <div className="flex gap-1.5">
-                  <button onClick={() => onDirectCall(f.user_id, 'text')} className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 transition" title="Text Chat"><MessageSquare className="h-4 w-4" /></button>
-                  <button onClick={() => onDirectCall(f.user_id, 'video')} className="p-2.5 rounded-xl bg-sky-500/10 text-sky-500 hover:bg-sky-500/20 transition" title="Video Call"><Video className="h-4 w-4" /></button>
+                  <button onClick={() => onDirectCall(f.user_id, 'text')} className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 transition"><MessageSquare className="h-4 w-4" /></button>
+                  <button onClick={() => onDirectCall(f.user_id, 'video')} className="p-2.5 rounded-xl bg-sky-500/10 text-sky-500 hover:bg-sky-500/20 transition"><Video className="h-4 w-4" /></button>
                 </div>
               </div>
             ))
@@ -636,7 +671,6 @@ function Searching({ mode, onCancel }: { mode: ChatMode; onCancel: () => void })
     <div className="flex flex-col items-center text-center">
       <div className="relative flex h-24 w-24 items-center justify-center">
         <div className="absolute inset-0 animate-ping rounded-full bg-accent/20" />
-        <div className="absolute inset-2 animate-pulse rounded-full bg-accent/30" />
         <div className="relative flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-accent to-accent-2 text-white">
           {mode === 'video' ? <Video className="h-7 w-7" /> : <MessageSquare className="h-7 w-7" />}
         </div>
@@ -827,7 +861,7 @@ function VideoRoom({
 
       <div className="absolute bottom-6 left-0 right-0 z-20 flex items-center justify-center gap-3 pt-1 px-4 sm:relative sm:bottom-0 sm:bg-transparent sm:px-0">
         <button onClick={onStop} className="inline-flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-black/40 backdrop-blur-md text-white sm:hidden"><ArrowLeft className="h-5 w-5" /></button>
-        {/* FIX APPLIED: Uses destructured context parameters properly */}
+        {/* FIXED TYPO: Properly calling the destructured functions onToggleCam and onToggleMic */}
         <ControlButton onClick={onToggleCam} active={camOn} label="Cam"><Camera className="h-5 w-5" /></ControlButton>
         <ControlButton onClick={onToggleMic} active={micOn} label={micOn ? 'Mute' : 'Unmute'}><MicIcon safeOn={micOn} /></ControlButton>
         <button onClick={onNext} className="inline-flex h-14 items-center gap-2 rounded-2xl bg-gradient-to-r from-accent to-accent-2 px-7 text-sm font-semibold text-white shadow-lg"><Shuffle className="h-5 w-5" /> Next</button>
@@ -899,6 +933,11 @@ function ControlButton({ onClick, active, label, children }: { onClick: () => vo
   );
 }
 
+// Full helper to cleanly determine image routing buckets inside text list arrays
+const isImageUrl = (url: string) => {
+  return url.match(/\.(jpeg|jpg|gif|png|webp|svg)/i) != null || url.includes('storage.googleapis.com') || url.includes('supabase.co');
+};
+
 function MicIcon({ safeOn }: { safeOn: boolean }) {
   return safeOn ? (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
@@ -917,84 +956,49 @@ function MicIcon({ safeOn }: { safeOn: boolean }) {
   );
 }
 
-function TextRoom({ 
-  conn, 
-  myId, 
-  onNext, 
-  partnerProfile,
-  onStop,
-}: { 
-  conn: ConnectionRow; 
-  myId: string; 
-  onNext: () => void; 
-  partnerProfile: any;
-  onStop: () => void;
-}) {
+function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: ConnectionRow; myId: string; onNext: () => void; partnerProfile: any; onStop: () => void; }) {
   const [messages, setMessages] = useState<ExtendedMessageRow[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ExtendedMessageRow | null>(null);
-  
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const typingTimeoutRef = useRef<number | null>(null);
 
   const syncMessages = useCallback(async () => {
-    const { data } = await supabase
-      .from('messages')
-      .select('*')
-      .eq('connection_id', conn.id)
-      .order('created_at', { ascending: true });
-
+    const { data } = await supabase.from('messages').select('*').eq('connection_id', conn.id).order('created_at', { ascending: true });
     if (data) {
-      const mapped: ExtendedMessageRow[] = (data as any[]).map(msg => {
+      setMessages((data as any[]).map(msg => {
         if (msg.reply_to_id) {
-          const quoted = data.find(m => m.id === msg.reply_to_id);
-          return { ...msg, reply_body: quoted ? quoted.body : "Message unavailable" };
+          const q = data.find(m => m.id === msg.reply_to_id);
+          return { ...msg, reply_body: q ? q.body : "Message unavailable" };
         }
         return msg;
-      });
-      setMessages(mapped);
+      }));
     }
   }, [conn.id]);
 
   useEffect(() => {
     syncMessages();
-
-    const msgChannel = supabase.channel(`realtime_msg_${conn.id}`)
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'messages', filter: `connection_id=eq.${conn.id}` },
-        (payload) => {
-          const newMsg = payload.new as MessageRow;
-          
-          // Background Push Notification Trigger with interactive action reply fields
-          if (String(newMsg.sender_id) !== String(myId) && document.hidden) {
-            if ('Notification' in window && Notification.permission === 'granted') {
-              navigator.serviceWorker.ready.then((registration) => {
-                registration.showNotification(partnerProfile?.display_name || "New Message", {
-                  body: newMsg.body.startsWith('http') ? "📷 Sent an image attachment" : newMsg.body,
-                  icon: partnerProfile?.avatar_url || "/user-placeholder.png",
-                  tag: conn.id,
-                  renotify: true,
-                  data: { connectionId: conn.id, myId: myId },
-                  actions: [
-                    {
-                      action: 'reply',
-                      title: 'Reply',
-                      type: 'text',
-                      placeholder: 'Type your reply here...'
-                    }
-                  ]
-                });
-              });
-            }
-          }
-          syncMessages();
+    const channel = supabase.channel(`realtime_msg_${conn.id}`)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `connection_id=eq.${conn.id}` }, (payload) => {
+        const newMsg = payload.new as MessageRow;
+        if (String(newMsg.sender_id) !== String(myId) && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+          navigator.serviceWorker.ready.then((reg) => {
+            reg.showNotification(partnerProfile?.display_name || "New Message", {
+              body: newMsg.body.startsWith('http') ? "📷 Sent an image attachment" : newMsg.body,
+              icon: partnerProfile?.avatar_url || undefined,
+              tag: conn.id,
+              renotify: true,
+              data: { connectionId: conn.id, myId: myId },
+              actions: [{ action: 'reply', title: 'Reply', type: 'text', placeholder: 'Type response...' }]
+            });
+          });
         }
-      )
+        syncMessages();
+      })
       .on('broadcast', { event: 'typing' }, (payload) => {
         if (String(payload.payload.senderId) !== String(myId)) {
           setIsTyping(true);
@@ -1004,68 +1008,36 @@ function TextRoom({
       })
       .subscribe();
 
-    return () => {
-      supabase.removeChannel(msgChannel);
-      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-    };
+    return () => { supabase.removeChannel(channel); };
   }, [conn.id, myId, syncMessages, partnerProfile]);
 
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
-  }, [messages, isTyping]);
-
-  const handleInputChange = (val: string) => {
-    setInput(val);
-    supabase.channel(`realtime_msg_${conn.id}`).send({
-      type: 'broadcast',
-      event: 'typing',
-      payload: { senderId: myId }
-    });
-  };
+  useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' }); }, [messages, isTyping]);
+  const handleInputChange = (val: string) => { setInput(val); supabase.channel(`realtime_msg_${conn.id}`).send({ type: 'broadcast', event: 'typing', payload: { senderId: myId } }); };
 
   const send = async (textBody?: string) => {
     const body = (textBody ?? input).trim();
     if (!body || sending) return;
     if (!textBody) setInput('');
     setSending(true);
-
-    const payload: any = {
-      connection_id: conn.id,
-      sender_id: myId,
-      body,
-    };
-
-    if (replyTarget) {
-      payload.reply_to_id = replyTarget.id;
-    }
-
-    const { error } = await supabase.from('messages').insert(payload);
+    const payload: any = { connection_id: conn.id, sender_id: myId, body };
+    if (replyTarget) payload.reply_to_id = replyTarget.id;
+    await supabase.from('messages').insert(payload);
     setSending(false);
     setReplyTarget(null);
-    if (!error) {
-      syncMessages();
-    } else if (!textBody) {
-      setInput(body);
-    }
+    syncMessages();
   };
 
   const handleAttachmentPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      const file = e.target.files[0];
       setUploading(true);
-      try {
-        const fileExt = file.name.split('.').pop();
-        const path = `${conn.id}/${Date.now()}-${Math.random()}.${fileExt}`;
-        const { error: uploadError } = await supabase.storage.from('attachments').upload(path, file);
-        if (uploadError) throw uploadError;
+      const file = e.target.files[0];
+      const path = `${conn.id}/${Date.now()}-${Math.random()}.${file.name.split('.').pop()}`;
+      const { error } = await supabase.storage.from('attachments').upload(path, file);
+      if (!error) {
         const { data } = supabase.storage.from('attachments').getPublicUrl(path);
         if (data?.publicUrl) await send(data.publicUrl);
-      } catch (err) {
-        console.error(err);
-      } finally {
-        setUploading(false);
-        if (fileInputRef.current) fileInputRef.current.value = '';
       }
+      setUploading(false);
     }
   };
 
@@ -1100,17 +1072,21 @@ function TextRoom({
                     <CornerUpLeft className="h-3.5 w-3.5" />
                   </button>
                 )}
-                <div className={`rounded-2xl px-4 py-2 text-sm shadow-sm ${mine ? 'bg-accent text-white' : 'bg-bg border border-line text-ink'}`}>
+                <div className={`rounded-2xl px-4 py-2 text-sm shadow-sm ${mine ? 'bg-accent text-white shadow-md' : 'bg-bg border border-line text-ink'}`}>
                   {m.reply_body && (
                     <div className="mb-1.5 p-1.5 rounded-lg text-[11px] bg-black/5 text-ink-muted border-l-2 border-accent truncate max-w-[200px]">
                       {m.reply_body}
                     </div>
                   )}
                   {isLink ? (
-                    <div className="py-1">
-                      <img src={m.body} alt="" className="rounded-lg max-h-48 object-contain bg-black/5" />
-                      <a href={m.body} target="_blank" rel="noreferrer" className="block text-[11px] underline mt-1 text-center opacity-80">Open Full Size</a>
-                    </div>
+                    isImageUrl(m.body) ? (
+                      <div className="py-1">
+                        <img src={m.body} alt="Attachment" className="rounded-lg max-h-48 object-contain bg-black/5" />
+                        <a href={m.body} target="_blank" rel="noreferrer" className="block text-[11px] underline mt-1 text-center opacity-80">Open Full Size</a>
+                      </div>
+                    ) : (
+                      <a href={m.body} target="_blank" rel="noreferrer" className="underline inline-flex items-center gap-1"><Download className="h-4 w-4" /> Download file</a>
+                    )
                   ) : m.body}
                 </div>
                 {mine && (
