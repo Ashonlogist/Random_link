@@ -479,6 +479,20 @@ function ChatApp({
     setError(null);
   }, [myId, teardownPeer, stopLocalStream]);
 
+  const toggleCam = useCallback(() => {
+    if (!localStream) return;
+    const newCam = !camOn;
+    localStream.getVideoTracks().forEach((t) => (t.enabled = newCam));
+    setCamOn(newCam);
+  }, [localStream, camOn]);
+
+  const toggleMic = useCallback(() => {
+    if (!localStream) return;
+    const newMic = !micOn;
+    localStream.getAudioTracks().forEach((t) => (t.enabled = newMic));
+    setMicOn(newMic);
+  }, [localStream, micOn]);
+
   return (
     <div className="flex min-h-screen flex-col bg-bg text-ink overflow-x-hidden relative">
       {phase !== 'connected' && (
@@ -522,8 +536,8 @@ function ChatApp({
             remoteVideoRef={remoteVideoRef}
             camOn={camOn}
             micOn={micOn}
-            onToggleCam={ontoggleCam}
-            onToggleMic={ontoggleMic}
+            onToggleCam={toggleCam}
+            onToggleMic={toggleMic}
             onNext={handleNext}
             onStop={handleStop}
             connectedAt={connectedAt}
@@ -676,7 +690,7 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
     await supabase
       .from('friendships')
       .delete()
-      .or(`and(user_id.eq.${myId},friend_id.eq.${friendId}),and(user_id.eq.${friendId},friend_id.eq.${friendId})`);
+      .or(`and(user_id.eq.${myId},friend_id.eq.${friendId}),and(user_id.eq.${friendId},friend_id.eq.${myId})`);
     fetchFriends();
   };
 
