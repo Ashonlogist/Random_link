@@ -1084,18 +1084,43 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Secure
   const handleInputChange = (val: string) => { setInput(val); supabase.channel(`realtime_msg_${conn.id}`).send({ type: 'broadcast', event: 'typing', payload: { senderId: myId } }); };
 
   const send = async (textBody?: string) => {
-    const body = (textBody ?? input).trim();
-    if (!body || sending) return;
-    if (!textBody) setInput('');
-    setSending(true);
-    const payload: any = { connection_id: conn.id, sender_id: myId, body };
-    if (replyTarget) payload.reply_to_id = replyTarget.id;
-    await supabase.from('messages').insert(payload);
-    setSending(false);
-    setReplyTarget(null);
-    syncMessages();
+  const body = (textBody ?? input).trim();
+  if (!body || sending) return;
+  if (!textBody) setInput('');
+  setSending(true);
+
+  const temporaryId = `temp-${Date.now()}`;
+  const optimisticMessage: ExtendedMessageRow = {
+    id: temporaryId,
+    connection_id: conn.id,
+    sender_id: myId,
+    body,
+    created_at: new Date().toISOString(),
+    reply_to_id: replyTarget ? replyTarget.id : null,
+    reply_body: replyTarget ? replyTarget.body : null
   };
 
+  // Append locally instantly
+  setMessages((prev) => [...prev, optimisticMessage]);
+
+  const payload: any = { connection_id: conn.id, sender_id: myId, body };
+  if (replyTarget) payload.reply_to_id = replyTarget.id;
+
+  const { data, error } = await supabase.from('messages').insert(payload).select().single();
+  
+  setSending(true); // track active loop
+  setSending(false);
+  setReplyTarget(null);
+
+  if (!error && data) {
+    // Replace the temporary optimistic entry with the formal database row object
+    setMessages((prev) =>
+      prev.map((msg) => (msg.id === temporaryId ? { ...data, reply_body: optimisticMessage.reply_body } : msg))
+    );
+  } else {
+    syncMessages();
+  }
+};
   const handleAttachmentPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setUploading(true);
@@ -1293,48 +1318,40 @@ function LiveChatStats() {
     text: { online: 0, chatting: 0 }
   });
 
+  const fetchStats = useCallback(async () => {
+    const [{ data: waiting }, { data: activeConns }] = await Promise.all([
+      supabase.from('waiting_room').select('mode'),
+      supabase.from('connections').select('mode').eq('status', 'connected')
+    ]);
+
+    const newStats = { video: { online: 0, chatting: 0 }, text: { online: 0, chatting: 0 } };
+
+    waiting?.forEach(r => { 
+      if (r.mode === 'video' || r.mode === 'text') newStats[r.mode].online++; 
+    });
+    
+    activeConns?.forEach(r => {
+      if (r.mode === 'video' || r.mode === 'text') {
+        newStats[r.mode].chatting += 2;
+        newStats[r.mode].online += 2;
+      }
+    });
+
+    setStats(newStats);
+  }, []);
+
   useEffect(() => {
-    let active = true;
-    const fetchStats = async () => {
-      const [{ data: waiting }, { data: activeConns }] = await Promise.all([
-        supabase.from('waiting_room').select('mode'),
-        supabase.from('connections').select('mode, created_at, updated_at').eq('status', 'connected')
-      ]);
-
-      if (!active) return;
-      const newStats = { video: { online: 0, chatting: 0 }, text: { online: 0, chatting: 0 } };
-
-      waiting?.forEach(r => { if (r.mode === 'video' || r.mode === 'text') newStats[r.mode].online++; });
-      
-      const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
-
-      activeConns?.forEach(r => {
-        if (r.mode === 'video') {
-          newStats.video.chatting += 2;
-          newStats.video.online += 2;
-        } else if (r.mode === 'text') {
-          const lastActive = new Date(r.updated_at || r.created_at).getTime();
-          if (lastActive >= fiveMinutesAgo) {
-            newStats.text.chatting += 2;
-          }
-          newStats.text.online += 2;
-        }
-      });
-      setStats(newStats);
-    };
-
     fetchStats();
     
-    const channel = supabase.channel('stats_channel')
+    const channel = supabase.channel('stats_realtime_changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'waiting_room' }, fetchStats)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'connections' }, fetchStats)
       .subscribe();
 
     return () => {
-      active = false;
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [fetchStats]);
 
   return (
     <div className="w-full flex flex-col items-center sm:flex-row sm:justify-center gap-3">
