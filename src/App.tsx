@@ -23,17 +23,12 @@ type ExtendedMessageRow = MessageRow & {
   reply_body?: string | null;
 };
 
-type SecureConnectionRow = ConnectionRow & {
-  is_direct?: boolean;
-};
-
 export default function App() {
   const { session, loading, refreshProfile, signOut } = useSession();
   const { theme, toggle } = useTheme();
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [friendsDrawerOpen, setFriendsDrawerOpen] = useState(false);
 
-  // Register background push Service Worker hooks
   useEffect(() => {
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js', { scope: '/' })
@@ -110,14 +105,14 @@ function ChatApp({
 }) {
   const [phase, setPhase] = useState<Phase>('lobby');
   const [mode, setMode] = useState<ChatMode>('video');
-  const [conn, setConn] = useState<SecureConnectionRow | null>(null);
+  const [conn, setConn] = useState<ConnectionRow | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [camOn, setCamOn] = useState(true);
   const [micOn, setMicOn] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
-  const [incomingInvitation, setIncomingInvitation] = useState<SecureConnectionRow | null>(null);
+  const [incomingInvitation, setIncomingInvitation] = useState<ConnectionRow | null>(null);
   const [inviterProfile, setInviterProfile] = useState<any | null>(null);
 
   const peerRef = useRef<PeerConnection | null>(null);
@@ -126,13 +121,15 @@ function ChatApp({
   const unsubIncomingRef = useRef<(() => void) | null>(null);
   const pruneTimerRef = useRef<number | null>(null);
   const modeRef = useRef<ChatMode>('video');
-  const connRef = useRef<SecureConnectionRow | null>(null);
+  const connRef = useRef<ConnectionRow | null>(null);
   const connectedAtRef = useRef<number | null>(null);
+  const phaseRef = useRef<Phase>(phase);
   const isInitializingRef = useRef(false);
 
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { connRef.current = conn; }, [conn]);
   useEffect(() => { connectedAtRef.current = connectedAt; }, [connectedAt]);
+  useEffect(() => { phaseRef.current = phase; }, [phase]);
 
   useEffect(() => {
     pruneTimerRef.current = window.setInterval(() => {
@@ -142,7 +139,6 @@ function ChatApp({
     return () => { if (pruneTimerRef.current) clearInterval(pruneTimerRef.current); };
   }, []);
 
-  // Listen live to dynamic realtime updates on arriving friend requests
   useEffect(() => {
     const friendChannel = supabase.channel('live_friendships_requests')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'friendships', filter: `friend_id=eq.${myId}` }, async (payload) => {
@@ -166,13 +162,14 @@ function ChatApp({
     return () => { supabase.removeChannel(friendChannel); };
   }, [myId]);
 
-  // Listen for direct friend calls (Completely isolated from pool matching updates)
+  // Handle direct buddy calls without database schema conflicts
   useEffect(() => {
     const channel = supabase.channel(`direct_calls_${myId}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'connections', filter: `responder_id=eq.${myId}` }, async (payload) => {
-        const incomingCall = payload.new as SecureConnectionRow;
+        const incomingCall = payload.new as ConnectionRow;
         
-        if (!incomingCall.is_direct) return;
+        // If we are actively searching the matchmaking pool, ignore the direct call popup overlap!
+        if (phaseRef.current === 'searching') return;
 
         if (incomingCall.status === 'pending') {
           setIncomingInvitation(incomingCall);
@@ -218,19 +215,26 @@ function ChatApp({
 
     setPhase('connected');
     setConnectedAt(Date.now());
-    const peer = new PeerConnection(incomingInvitation, myId, {
-      onRemoteStream: (s) => setRemoteStream(s),
-      onDisconnected: () => handleStop(),
-      onError: (e) => console.error(e),
-    });
-    peerRef.current = peer;
-    await peer.attachLocalStream(stream);
-    try {
-      await peer.acceptOffer();
-    } catch (err) {
-      console.error(err);
-      handleStop();
-    } finally {
+    
+    if (directMode === 'video') {
+      const peer = new PeerConnection(incomingInvitation, myId, {
+        onRemoteStream: (s) => setRemoteStream(s),
+        onDisconnected: () => handleStop(),
+        onError: (e) => console.error(e),
+      });
+      peerRef.current = peer;
+      await peer.attachLocalStream(stream);
+      try {
+        await peer.acceptOffer();
+      } catch (err) {
+        handleStop();
+      } finally {
+        isInitializingRef.current = false;
+      }
+    } else {
+      try {
+        await supabase.from('connections').update({ status: 'connected' }).eq('id', incomingInvitation.id);
+      } catch {}
       isInitializingRef.current = false;
     }
     setIncomingInvitation(null);
@@ -242,7 +246,7 @@ function ChatApp({
     setIncomingInvitation(null);
   };
 
-  const pushMatchNotification = useCallback(async (incoming: SecureConnectionRow) => {
+  const pushMatchNotification = useCallback(async (incoming: ConnectionRow) => {
     if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
       const partnerId = incoming.initiator_id === myId ? incoming.responder_id : incoming.initiator_id;
       const { data: partner } = await supabase.from('profiles').select('display_name, avatar_url').eq('user_id', partnerId).maybeSingle();
@@ -315,18 +319,26 @@ function ChatApp({
         setConn(incoming);
         setPhase('connected');
         setConnectedAt(Date.now());
-        const peer = new PeerConnection(incoming, myId, {
-          onRemoteStream: (s) => setRemoteStream(s),
-          onDisconnected: () => handleNext(),
-          onError: (e) => console.error('[DIAGNOSTIC] Peer connection issue:', e),
-        });
-        peerRef.current = peer;
-        await peer.attachLocalStream(stream);
-        try {
-          await peer.acceptOffer();
-        } catch (err: any) {
-          handleNext();
-        } finally {
+
+        if (incoming.mode === 'video') {
+          const peer = new PeerConnection(incoming, myId, {
+            onRemoteStream: (s) => setRemoteStream(s),
+            onDisconnected: () => handleNext(),
+            onError: (e) => console.error('[DIAGNOSTIC] Peer connection issue:', e),
+          });
+          peerRef.current = peer;
+          await peer.attachLocalStream(stream);
+          try {
+            await peer.acceptOffer();
+          } catch (err: any) {
+            handleNext();
+          } finally {
+            isInitializingRef.current = false;
+          }
+        } else {
+          try {
+            await supabase.from('connections').update({ status: 'connected' }).eq('id', incoming.id);
+          } catch {}
           isInitializingRef.current = false;
         }
       });
@@ -341,18 +353,23 @@ function ChatApp({
           setConn(result.conn);
           setPhase('connected');
           setConnectedAt(Date.now());
-          const peer = new PeerConnection(result.conn, myId, {
-            onRemoteStream: (s) => setRemoteStream(s),
-            onDisconnected: () => handleNext(),
-            onError: (e) => console.error('[DIAGNOSTIC] Peer connection issue:', e),
-          });
-          peerRef.current = peer;
-          await peer.attachLocalStream(stream);
-          try {
-            await peer.createOffer();
-          } catch (err: any) {
-            handleNext();
-          } finally {
+          
+          if (selectedMode === 'video') {
+            const peer = new PeerConnection(result.conn, myId, {
+              onRemoteStream: (s) => setRemoteStream(s),
+              onDisconnected: () => handleNext(),
+              onError: (e) => console.error('[DIAGNOSTIC] Peer connection issue:', e),
+            });
+            peerRef.current = peer;
+            await peer.attachLocalStream(stream);
+            try {
+              await peer.createOffer();
+            } catch (err: any) {
+              handleNext();
+            } finally {
+              isInitializingRef.current = false;
+            }
+          } else {
             isInitializingRef.current = false;
           }
         }
@@ -402,7 +419,6 @@ function ChatApp({
         .from('connections')
         .select('*')
         .eq('mode', 'text')
-        .eq('is_direct', true)
         .or(`and(initiator_id.eq.${myId},responder_id.eq.${friendId}),and(initiator_id.eq.${friendId},responder_id.eq.${myId})`)
         .order('created_at', { ascending: false })
         .limit(1)
@@ -423,8 +439,7 @@ function ChatApp({
         initiator_id: myId,
         responder_id: friendId,
         mode: directMode,
-        status: 'pending',
-        is_direct: true
+        status: 'pending'
       })
       .select()
       .single();
@@ -439,18 +454,23 @@ function ChatApp({
     setConn(directConn);
     setPhase('connected');
     setConnectedAt(Date.now());
-    const peer = new PeerConnection(directConn, myId, {
-      onRemoteStream: (s) => setRemoteStream(s),
-      onDisconnected: () => handleStop(),
-      onError: (e) => console.error(e),
-    });
-    peerRef.current = peer;
-    await peer.attachLocalStream(stream);
-    try {
-      await peer.createOffer();
-    } catch (err) {
-      handleStop();
-    } finally {
+
+    if (directMode === 'video') {
+      const peer = new PeerConnection(directConn, myId, {
+        onRemoteStream: (s) => setRemoteStream(s),
+        onDisconnected: () => handleStop(),
+        onError: (e) => console.error(e),
+      });
+      peerRef.current = peer;
+      await peer.attachLocalStream(stream);
+      try {
+        await peer.createOffer();
+      } catch (err) {
+        handleStop();
+      } finally {
+        isInitializingRef.current = false;
+      }
+    } else {
       isInitializingRef.current = false;
     }
   }, [myId]);
@@ -661,7 +681,7 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
       .from('friendships')
       .select('*')
       .eq('status', 'accepted')
-      .or(`user_id.eq.${myId},friend_id.eq.${myId}`); // FIX: Filter strictly by active session ID
+      .or(`user_id.eq.${myId},friend_id.eq.${myId}`); // Fix: Limit to only our friendships
 
     if (!error && data) {
       const ids = data.map(f => f.user_id === myId ? f.friend_id : f.user_id);
@@ -691,14 +711,15 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
   const handleUnfriend = async (friendId: string) => {
     if (!window.confirm("Are you sure you want to unfriend this user?")) return;
     
+    // Instantly remove them visually while DB catches up
+    setFriends(prev => prev.filter(f => f.user_id !== friendId));
+
     const { error } = await supabase
       .from('friendships')
       .delete()
       .or(`and(user_id.eq.${myId},friend_id.eq.${friendId}),and(user_id.eq.${friendId},friend_id.eq.${myId})`);
       
-    if (!error) {
-      fetchFriends();
-    }
+    if (!error) fetchFriends();
   };
 
   return (
@@ -768,8 +789,6 @@ function Searching({ mode, onCancel }: { mode: ChatMode; onCancel: () => void })
   );
 }
 
-
-
 function ChatRoom({
   conn,
   myId,
@@ -786,7 +805,7 @@ function ChatRoom({
   onStop,
   connectedAt,
 }: {
-  conn: SecureConnectionRow;
+  conn: ConnectionRow;
   myId: string;
   mode: ChatMode;
   localStream: MediaStream | null;
@@ -873,7 +892,7 @@ function VideoRoom({
   onStop,
   partnerProfile,
 }: {
-  conn: SecureConnectionRow;
+  conn: ConnectionRow;
   myId: string;
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
@@ -1034,16 +1053,18 @@ function MicIcon({ safeOn }: { safeOn: boolean }) {
   );
 }
 
-function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: SecureConnectionRow; myId: string; onNext: () => void; partnerProfile: any; onStop: () => void; }) {
+function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: ConnectionRow; myId: string; onNext: () => void; partnerProfile: any; onStop: () => void; }) {
   const [messages, setMessages] = useState<ExtendedMessageRow[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
   const [replyTarget, setReplyTarget] = useState<ExtendedMessageRow | null>(null);
+  
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const typingTimeoutRef = useRef<number | null>(null);
+  const channelRef = useRef<any>(null); // Store channel ref to prevent typing broadcast crashes
 
   const syncMessages = useCallback(async () => {
     const { data } = await supabase.from('messages').select('*').eq('connection_id', conn.id).order('created_at', { ascending: true });
@@ -1060,15 +1081,28 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Secure
 
   useEffect(() => {
     syncMessages();
-    const channel = supabase.channel(`realtime_msg_${conn.id}`)
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `connection_id=eq.${conn.id}` }, (payload) => {
+    
+    // Listen for partner disconnecting to gracefully unmount Room
+    const sessionChannel = supabase.channel(`text_session_${conn.id}`)
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'connections', filter: `id=eq.${conn.id}` }, (payload) => {
+        if (payload.new && payload.new.status === 'ended') onNext();
+      })
+      .subscribe();
+
+    channelRef.current = supabase.channel(`realtime_msg_${conn.id}`);
+    channelRef.current
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `connection_id=eq.${conn.id}` }, (payload: any) => {
         const newMsg = payload.new as MessageRow;
         
         setMessages((prev) => {
-          // FIX: Correct identification to verify if our optimistic temp id or body parameters match
-          if (prev.some((m) => m.id === newMsg.id || (m.body === newMsg.body && m.sender_id === newMsg.sender_id && m.id.startsWith('temp-')))) {
-            // Replace the matching temporary message with the real server response to preserve the confirmed id
-            return prev.map((m) => (m.body === newMsg.body && m.sender_id === newMsg.sender_id && m.id.startsWith('temp-')) ? newMsg : m);
+          if (prev.some(m => m.id === newMsg.id)) return prev;
+          
+          // Overwrite the optimistic UI temp message precisely to preserve the UI state properly
+          const tempIdx = prev.findIndex(m => m.body === newMsg.body && m.sender_id === newMsg.sender_id && m.id.startsWith('temp-'));
+          if (tempIdx !== -1) {
+            const updated = [...prev];
+            updated[tempIdx] = { ...newMsg, reply_body: updated[tempIdx].reply_body };
+            return updated;
           }
           
           if (String(newMsg.sender_id) !== String(myId) && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
@@ -1086,7 +1120,7 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Secure
           return [...prev, newMsg];
         });
       })
-      .on('broadcast', { event: 'typing' }, (payload) => {
+      .on('broadcast', { event: 'typing' }, (payload: any) => {
         if (String(payload.payload.senderId) !== String(myId)) {
           setIsTyping(true);
           if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
@@ -1095,11 +1129,20 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Secure
       })
       .subscribe();
 
-    return () => { supabase.removeChannel(channel); };
-  }, [conn.id, myId, syncMessages, partnerProfile]);
+    return () => { 
+      supabase.removeChannel(sessionChannel);
+      if (channelRef.current) supabase.removeChannel(channelRef.current);
+    };
+  }, [conn.id, myId, syncMessages, partnerProfile, onNext]);
 
   useEffect(() => { scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' }); }, [messages, isTyping]);
-  const handleInputChange = (val: string) => { setInput(val); supabase.channel(`realtime_msg_${conn.id}`).send({ type: 'broadcast', event: 'typing', payload: { senderId: myId } }); };
+  
+  const handleInputChange = (val: string) => { 
+    setInput(val); 
+    if (channelRef.current?.state === 'joined') {
+      channelRef.current.send({ type: 'broadcast', event: 'typing', payload: { senderId: myId } }).catch(() => {});
+    }
+  };
 
   const send = async (textBody?: string) => {
     const body = (textBody ?? input).trim();
@@ -1119,19 +1162,25 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Secure
     };
 
     setMessages((prev) => [...prev, optimisticMessage]);
+    
+    // Store it so we can push properly, then instantly clear the UI state
+    const currentReplyTarget = replyTarget;
     setReplyTarget(null);
 
     const payload: any = { connection_id: conn.id, sender_id: myId, body };
-    if (replyTarget) payload.reply_to_id = replyTarget.id;
+    if (currentReplyTarget) payload.reply_to_id = currentReplyTarget.id;
 
-    // FIX: Remove syncMessages() loop execution block to ensure local state remains clean and intact
-    const { data, error } = await supabase.from('messages').insert(payload).select().maybeSingle();
-    setSending(false);
-
-    if (!error && data) {
-      setMessages((prev) =>
-        prev.map((msg) => (msg.id === temporaryId ? { ...data, reply_body: optimisticMessage.reply_body } : msg))
-      );
+    try {
+      const { data, error } = await supabase.from('messages').insert(payload).select().maybeSingle();
+      if (!error && data) {
+        setMessages((prev) => prev.map((msg) => (msg.id === temporaryId ? { ...data, reply_body: optimisticMessage.reply_body } : msg)));
+      } else {
+        syncMessages(); // Recovery mechanism
+      }
+    } catch (e) {
+      syncMessages(); // Recovery mechanism
+    } finally {
+      setSending(false); // Unlocks input bar no matter what happens
     }
   };
 
@@ -1199,7 +1248,7 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Secure
         {replyTarget && <div className="mb-2 flex items-center justify-between p-2 rounded-xl bg-bg border border-line text-xs"><div className="truncate"><span className="font-semibold text-accent block">Replying to:</span><span className="text-ink-muted truncate block max-w-md">{replyTarget.body}</span></div><button onClick={() => setReplyTarget(null)} className="text-ink-faint hover:text-ink p-1"><X className="h-4 w-4" /></button></div>}
         <div className="flex items-center gap-2">
           <input type="file" ref={fileInputRef} onChange={handleAttachmentPick} className="hidden" />
-          <button onClick={fileInputRef.current?.click} className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border bg-bg text-ink-muted hover:text-ink transition">{uploading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Paperclip className="h-5 w-5" />}</button>
+          <button onClick={() => fileInputRef.current?.click()} className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border bg-bg text-ink-muted hover:text-ink transition">{uploading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Paperclip className="h-5 w-5" />}</button>
           <input value={input} onChange={(e) => handleInputChange(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} placeholder="Type a message…" className="flex-1 min-w-0 rounded-xl border bg-bg px-4 py-3 text-sm focus:outline-none" />
           <button onClick={() => send()} disabled={!input.trim()} className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent text-white transition disabled:opacity-40"><Send className="h-5 w-5" /></button>
         </div>
