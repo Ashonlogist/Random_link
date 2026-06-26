@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Video, MessageSquare, Shuffle, X, Send, Loader2, Camera, ArrowLeft, Sparkles, LogOut, Sun, Moon, MoreVertical, Paperclip, Download, User, Edit, UserPlus, Check, CornerUpLeft } from 'lucide-react';
+import { Video, MessageSquare, Shuffle, X, Send, Loader2, Camera, ArrowLeft, Sparkles, LogOut, Sun, Moon, Menu, Paperclip, Download, User, Edit, UserPlus, Check, CornerUpLeft } from 'lucide-react';
 import { supabase, type ChatMode, type ConnectionRow, type MessageRow, type Profile } from './lib/supabase';
 import { PeerConnection } from './lib/webrtc';
 import {
@@ -27,6 +27,7 @@ export default function App() {
   const { session, loading, refreshProfile, signOut } = useSession();
   const { theme, toggle } = useTheme();
   const [profileModalOpen, setProfileModalOpen] = useState(false);
+  const [friendsDrawerOpen, setFriendsDrawerOpen] = useState(false);
 
   useEffect(() => {
     if ('Notification' in window && Notification.permission === 'default') {
@@ -60,13 +61,19 @@ export default function App() {
         theme={theme}
         onToggleTheme={toggle}
         onOpenProfile={() => setProfileModalOpen(true)}
+        friendsDrawerOpen={friendsDrawerOpen}
+        setFriendsDrawerOpen={setFriendsDrawerOpen}
       />
       
       {profileModalOpen && (
         <EditProfileModal 
           profile={session.profile as ExtendedProfile} 
+          email={session.user.email || ''}
           onClose={() => setProfileModalOpen(false)} 
           onRefresh={refreshProfile}
+          onSignOut={signOut}
+          theme={theme}
+          onToggleTheme={toggle}
         />
       )}
     </>
@@ -81,6 +88,8 @@ function ChatApp({
   theme,
   onToggleTheme,
   onOpenProfile,
+  friendsDrawerOpen,
+  setFriendsDrawerOpen,
 }: {
   myId: string;
   profile: ExtendedProfile;
@@ -89,6 +98,8 @@ function ChatApp({
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
   onOpenProfile: () => void;
+  friendsDrawerOpen: boolean;
+  setFriendsDrawerOpen: (v: boolean) => void;
 }) {
   const [phase, setPhase] = useState<Phase>('lobby');
   const [mode, setMode] = useState<ChatMode>('video');
@@ -99,7 +110,6 @@ function ChatApp({
   const [micOn, setMicOn] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);
 
   const peerRef = useRef<PeerConnection | null>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
@@ -227,6 +237,7 @@ function ChatApp({
     setConn(null);
     setRemoteStream(null);
     setConnectedAt(null);
+    setFriendsDrawerOpen(false);
 
     let stream: MediaStream | null = null;
     if (directMode === 'video') {
@@ -239,6 +250,26 @@ function ChatApp({
       } catch (err: any) {
         setError('Media devices failed.');
         setPhase('lobby');
+        return;
+      }
+    }
+
+    // Direct Message History Check: Look for an existing text chat connection
+    if (directMode === 'text') {
+      const { data: existing } = await supabase
+        .from('connections')
+        .select('*')
+        .eq('mode', 'text')
+        .or(`and(initiator_id.eq.${myId},responder_id.eq.${friendId}),and(initiator_id.eq.${friendId},responder_id.eq.${myId})`)
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (existing) {
+        // Reuse historical connection frame rather than re-instantiating an empty clean room
+        setConn(existing);
+        setPhase('connected');
+        setConnectedAt(Date.now());
         return;
       }
     }
@@ -271,7 +302,7 @@ function ChatApp({
     peerRef.current = peer;
     await peer.attachLocalStream(stream);
     await peer.createOffer();
-  }, [myId]);
+  }, [myId, setFriendsDrawerOpen]);
 
   const handleNext = useCallback(async () => {
     await teardownPeer();
@@ -295,41 +326,23 @@ function ChatApp({
     setError(null);
   }, [myId, teardownPeer, stopLocalStream]);
 
-  const toggleCam = useCallback(() => {
-    if (!localStream) return;
-    const newCam = !camOn;
-    localStream.getVideoTracks().forEach((t) => (t.enabled = newCam));
-    setCamOn(newCam);
-  }, [localStream, camOn]);
-
-  const toggleMic = useCallback(() => {
-    if (!localStream) return;
-    const newMic = !micOn;
-    localStream.getAudioTracks().forEach((t) => (t.enabled = newMic));
-    setMicOn(newMic);
-  }, [localStream, micOn]);
-
   return (
-    <div className="flex min-h-screen flex-col bg-bg text-ink overflow-x-hidden">
+    <div className="flex min-h-screen flex-col bg-bg text-ink overflow-x-hidden relative">
       {phase !== 'connected' && (
         <Header
           profile={profile}
-          email={email}
-          menuOpen={menuOpen}
-          setMenuOpen={setMenuOpen}
-          onSignOut={onSignOut}
-          theme={theme}
-          onToggleTheme={onToggleTheme}
           onOpenProfile={onOpenProfile}
+          onToggleDrawer={() => setFriendsDrawerOpen(!friendsDrawerOpen)}
         />
       )}
+      
       <main className={`flex flex-1 flex-col items-center justify-center ${phase === 'connected' ? 'p-0 w-full h-screen' : 'px-4 py-6 pb-[calc(1.5rem+env(safe-area-inset-bottom))]'}`}>
         {error && phase !== 'connected' && (
           <div className="mb-4 w-full max-w-md rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-600 dark:text-rose-200">
             {error}
           </div>
         )}
-        {phase === 'lobby' && <Lobby onStart={startSearching} onDirectCall={startDirectCall} profile={profile} myId={myId} />}
+        {phase === 'lobby' && <Lobby onStart={startSearching} profile={profile} />}
         {phase === 'searching' && <Searching mode={mode} onCancel={handleStop} />}
         {phase === 'connected' && conn && (
           <ChatRoom
@@ -350,41 +363,23 @@ function ChatApp({
           />
         )}
       </main>
+
+      {/* Full-Screen Sliding Sidebar DM Layout replacement */}
+      <FriendsDrawer isOpen={friendsDrawerOpen} onClose={() => setFriendsDrawerOpen(false)} myId={myId} onDirectCall={startDirectCall} />
+
       {phase !== 'connected' && <Footer />}
     </div>
   );
 }
 
-function ThemeButton({ theme, onToggle, className }: { theme: 'light' | 'dark'; onToggle: () => void; className?: string }) {
-  return (
-    <button
-      onClick={onToggle}
-      aria-label="Toggle theme"
-      className={`inline-flex h-9 w-9 items-center justify-center rounded-xl border border-line bg-bg-elev text-ink-muted transition hover:text-ink ${className ?? ''}`}
-    >
-      {theme === 'dark' ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-    </button>
-  );
-}
-
 function Header({
   profile,
-  email,
-  menuOpen,
-  setMenuOpen,
-  onSignOut,
-  theme,
-  onToggleTheme,
   onOpenProfile,
+  onToggleDrawer,
 }: {
   profile: ExtendedProfile;
-  email: string;
-  menuOpen: boolean;
-  setMenuOpen: (v: boolean) => void;
-  onSignOut: () => void;
-  theme: 'light' | 'dark';
-  onToggleTheme: () => void;
   onOpenProfile: () => void;
+  onToggleDrawer: () => void;
 }) {
   return (
     <header className="sticky top-0 z-30 w-full border-b border-line bg-bg/80 backdrop-blur-lg">
@@ -397,12 +392,10 @@ function Header({
         </div>
 
         <div className="flex items-center gap-3">
-          <ThemeButton theme={theme} onToggle={onToggleTheme} />
-          
           <button
             onClick={onOpenProfile}
             className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full border border-line bg-bg-elev hover:border-accent transition"
-            title="Profile Settings"
+            title="Profile & Settings"
           >
             {profile.avatar_url ? (
               <img src={profile.avatar_url} alt="Profile" className="h-full w-full object-cover" />
@@ -411,43 +404,28 @@ function Header({
             )}
           </button>
 
-          <div className="relative">
-            <button
-              onClick={() => setMenuOpen(!menuOpen)}
-              className="flex h-9 w-9 items-center justify-center rounded-xl border border-line bg-bg-elev text-ink-muted transition hover:text-ink"
-            >
-              <MoreVertical className="h-4 w-4" />
-            </button>
-            {menuOpen && (
-              <>
-                <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
-                <div className="absolute right-0 z-20 mt-2 w-60 rounded-xl border border-line bg-bg-elev p-2 shadow-2xl">
-                  <div className="px-3 py-2">
-                    <p className="text-sm font-medium text-ink">{profile.display_name}</p>
-                    <p className="truncate text-xs text-ink-faint">{email}</p>
-                  </div>
-                  <div className="my-1 h-px bg-line" />
-                  <button onClick={onSignOut} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm text-rose-500 transition hover:bg-rose-500/10">
-                    <LogOut className="h-4 w-4" /> Sign out
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
+          {/* Three Dashes Hamburger replacing the old MoreVertical three dots */}
+          <button
+            onClick={onToggleDrawer}
+            className="flex h-9 w-9 items-center justify-center rounded-xl border border-line bg-bg-elev text-ink-muted transition hover:text-ink"
+            title="Open DMs"
+          >
+            <Menu className="h-4 w-4" />
+          </button>
         </div>
       </div>
     </header>
   );
 }
 
-function Lobby({ onStart, onDirectCall, profile, myId }: { onStart: (mode: ChatMode) => void; onDirectCall: (id: string, mode: ChatMode) => void; profile: ExtendedProfile; myId: string }) {
+function Lobby({ onStart, profile }: { onStart: (mode: ChatMode) => void; profile: ExtendedProfile }) {
   return (
     <div className="flex w-full max-w-3xl flex-col items-center text-center">
       <h1 className="mt-2 bg-gradient-to-r from-accent to-accent-2 bg-clip-text text-4xl font-bold tracking-tight text-transparent sm:text-5xl">
         Hey, {profile.display_name}
       </h1>
       <p className="mt-3 max-w-md text-ink-muted">
-        Get paired with someone new or connect directly with friends.
+        Get paired with someone new. Open the side menu anytime to chat with friends.
       </p>
 
       <LiveChatStats />
@@ -455,7 +433,7 @@ function Lobby({ onStart, onDirectCall, profile, myId }: { onStart: (mode: ChatM
       <div className="mt-8 grid w-full grid-cols-1 gap-4 sm:grid-cols-2">
         <button
           onClick={() => onStart('video')}
-          className="group relative overflow-hidden rounded-2xl border bg-gradient-to-br p-6 text-left transition-all duration-300 hover:scale-[1.02] hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-accent/50 border-sky-400/30"
+          className="group relative overflow-hidden rounded-2xl border bg-gradient-to-br p-6 text-left transition-all duration-300 hover:scale-[1.02] hover:shadow-xl border-sky-400/30"
         >
           <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-sky-500/15 text-sky-500 transition-transform duration-300 group-hover:scale-110">
             <Video className="h-7 w-7" />
@@ -466,7 +444,7 @@ function Lobby({ onStart, onDirectCall, profile, myId }: { onStart: (mode: ChatM
 
         <button
           onClick={() => onStart('text')}
-          className="group relative overflow-hidden rounded-2xl border bg-gradient-to-br p-6 text-left transition-all duration-300 hover:scale-[1.02] hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-accent/50 border-emerald-400/30"
+          className="group relative overflow-hidden rounded-2xl border bg-gradient-to-br p-6 text-left transition-all duration-300 hover:scale-[1.02] hover:shadow-xl border-emerald-400/30"
         >
           <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-600 transition-transform duration-300 group-hover:scale-110">
             <MessageSquare className="h-7 w-7" />
@@ -475,17 +453,19 @@ function Lobby({ onStart, onDirectCall, profile, myId }: { onStart: (mode: ChatM
           <p className="mt-1 text-sm text-ink-muted">Messaging, no camera needed</p>
         </button>
       </div>
-
-      <FriendsPanel myId={myId} onDirectCall={onDirectCall} />
     </div>
   );
 }
 
-function FriendsPanel({ myId, onDirectCall }: { myId: string; onDirectCall: (id: string, mode: ChatMode) => void }) {
+// Sidebar Drawer component that replaces the cluttered list under the lobby text boxes
+function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolean; onClose: () => void; myId: string; onDirectCall: (id: string, mode: ChatMode) => void }) {
   const [friends, setFriends] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    if (!isOpen) return;
     const fetchFriends = async () => {
+      setLoading(true);
       const { data, error } = await supabase
         .from('friendships')
         .select('*')
@@ -500,41 +480,55 @@ function FriendsPanel({ myId, onDirectCall }: { myId: string; onDirectCall: (id:
           setFriends([]);
         }
       }
+      setLoading(false);
     };
     fetchFriends();
 
-    // Listen live to real-time additions to the friendship roster
-    const channel = supabase.channel('friendships_lobby')
+    const channel = supabase.channel('friendships_drawer')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'friendships' }, fetchFriends)
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
-  }, [myId]);
-
-  if (friends.length === 0) return null;
+  }, [myId, isOpen]);
 
   return (
-    <div className="mt-10 w-full text-left max-w-xl mx-auto border border-line bg-bg-elev p-4 rounded-2xl shadow-md">
-      <h3 className="text-xs font-bold uppercase tracking-wider text-ink-muted mb-3 px-1">Your Connected Friends</h3>
-      <div className="space-y-2">
-        {friends.map(f => (
-          <div key={f.user_id} className="flex items-center justify-between p-2.5 rounded-xl bg-bg border border-line">
-            <div className="flex items-center gap-2">
-              {f.avatar_url ? (
-                <img src={f.avatar_url} alt="" className="h-8 w-8 rounded-full object-cover" />
-              ) : (
-                <div className="h-8 w-8 rounded-full bg-accent/20 flex items-center justify-center"><User className="h-4 w-4 text-accent" /></div>
-              )}
-              <span className="text-sm font-medium">{f.display_name}</span>
+    <>
+      {isOpen && <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 transition-opacity" onClick={onClose} />}
+      <div className={`fixed top-0 right-0 h-full w-full sm:w-[400px] bg-bg border-l border-line z-50 shadow-2xl flex flex-col transition-transform duration-300 ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}>
+        <div className="p-4 border-b border-line flex items-center justify-between bg-bg-elev">
+          <h3 className="text-base font-bold tracking-tight inline-flex items-center gap-2"><MessageSquare className="h-4 w-4 text-accent"/> Direct DMs</h3>
+          <button onClick={onClose} className="p-2 rounded-xl border border-line text-ink-muted hover:text-ink bg-bg"><X className="h-4 w-4" /></button>
+        </div>
+        
+        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          {loading ? (
+            <div className="flex justify-center items-center h-32"><Loader2 className="h-5 w-5 animate-spin text-accent" /></div>
+          ) : friends.length === 0 ? (
+            <div className="text-center text-ink-faint py-10">
+              <User className="h-8 w-8 mx-auto opacity-40 mb-2"/>
+              <p className="text-sm">No connected friends yet. Add strangers during chat to build your friend list!</p>
             </div>
-            <div className="flex gap-1">
-              <button onClick={() => onDirectCall(f.user_id, 'text')} className="p-2 rounded-lg bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 transition"><MessageSquare className="h-4 w-4" /></button>
-              <button onClick={() => onDirectCall(f.user_id, 'video')} className="p-2 rounded-lg bg-sky-500/10 text-sky-500 hover:bg-sky-500/20 transition"><Video className="h-4 w-4" /></button>
-            </div>
-          </div>
-        ))}
+          ) : (
+            friends.map(f => (
+              <div key={f.user_id} className="flex items-center justify-between p-3 rounded-2xl bg-bg-elev border border-line shadow-sm hover:border-accent transition">
+                <div className="flex items-center gap-2.5">
+                  {f.avatar_url ? (
+                    <img src={f.avatar_url} alt="" className="h-10 w-10 rounded-full object-cover border border-line" />
+                  ) : (
+                    <div className="h-10 w-10 rounded-full bg-accent/10 flex items-center justify-center"><User className="h-5 w-5 text-accent" /></div>
+                  )}
+                  <span className="text-sm font-semibold tracking-tight">{f.display_name}</span>
+                </div>
+                <div className="flex gap-1.5">
+                  <button onClick={() => onDirectCall(f.user_id, 'text')} className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 transition" title="Text Chat"><MessageSquare className="h-4 w-4" /></button>
+                  <button onClick={() => onDirectCall(f.user_id, 'video')} className="p-2.5 rounded-xl bg-sky-500/10 text-sky-500 hover:bg-sky-500/20 transition" title="Video Call"><Video className="h-4 w-4" /></button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
       </div>
-    </div>
+    </>
   );
 }
 
@@ -551,7 +545,7 @@ function Searching({ mode, onCancel }: { mode: ChatMode; onCancel: () => void })
       <h2 className="mt-6 text-2xl font-semibold">Looking…</h2>
       <p className="mt-2 text-sm text-ink-muted">Finding someone for you.</p>
 
-      <LiveChatStats currentMode={mode} />
+      <LiveChatStats />
 
       <button
         onClick={onCancel}
@@ -764,7 +758,6 @@ function FriendActionButton({ myId, partnerId }: { myId: string; partnerId: stri
   useEffect(() => {
     checkFriendship();
 
-    // Listen live to dynamic realtime updates on the friendship schema changes
     const channel = supabase.channel(`friendship_room_${partnerId}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'friendships' }, checkFriendship)
       .subscribe();
@@ -788,6 +781,39 @@ function FriendActionButton({ myId, partnerId }: { myId: string; partnerId: stri
       <UserPlus className="h-3.5 w-3.5" />
       {fStatus === 'pending_sent' ? 'Sent' : fStatus === 'pending_received' ? 'Accept Friend' : 'Add Friend'}
     </button>
+  );
+}
+
+function ControlButton({ onClick, active, label, children }: { onClick: () => void; active: boolean; label: string; children: any }) {
+  return (
+    <button
+      onClick={onClick}
+      title={label}
+      aria-label={label}
+      className={`inline-flex h-14 w-14 items-center justify-center rounded-2xl border transition active:scale-95 ${
+        active ? 'border-line bg-bg-elev text-ink' : 'border-rose-500/40 bg-rose-500/10 text-rose-500 dark:text-rose-300'
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function MicIcon({ safeOn }: { safeOn: boolean }) {
+  return safeOn ? (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+      <rect x="9" y="2" width="6" height="12" rx="3" />
+      <path d="M5 10a7 7 0 0 0 14 0" />
+      <line x1="12" y1="19" x2="12" y2="22" />
+    </svg>
+  ) : (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
+      <line x1="2" y1="2" x2="22" y2="22" />
+      <path d="M9 9v1a3 3 0 0 0 5.12 2.12" />
+      <path d="M15 9.34V5a3 3 0 0 0-5.94-.6" />
+      <path d="M5 10a7 7 0 0 0 10.71 5.95" />
+      <line x1="12" y1="19" x2="12" y2="22" />
+    </svg>
   );
 }
 
@@ -837,7 +863,6 @@ function TextRoom({
   useEffect(() => {
     syncMessages();
 
-    // Listen to real-time additions to the messages list instantly
     const msgChannel = supabase.channel(`realtime_msg_${conn.id}`)
       .on(
         'postgres_changes',
@@ -939,16 +964,12 @@ function TextRoom({
           const mine = m.sender_id === myId;
           const isLink = m.body.startsWith('http');
           return (
-            <div 
-              key={m.id} 
-              className={`flex ${mine ? 'justify-end' : 'justify-start'} group`}
-            >
+            <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'} group`}>
               <div className="flex items-center gap-2 max-w-[78%]">
                 {!mine && (
                   <button 
                     onClick={() => setReplyTarget(m)} 
                     className="opacity-0 group-hover:opacity-100 p-1.5 rounded-xl bg-bg border border-line text-ink-muted hover:text-ink transition order-last shadow-sm"
-                    title="Reply to message"
                   >
                     <CornerUpLeft className="h-3.5 w-3.5" />
                   </button>
@@ -970,7 +991,6 @@ function TextRoom({
                   <button 
                     onClick={() => setReplyTarget(m)} 
                     className="opacity-0 group-hover:opacity-100 p-1.5 rounded-xl bg-bg border border-line text-ink-muted hover:text-ink transition shadow-sm"
-                    title="Reply to message"
                   >
                     <CornerUpLeft className="h-3.5 w-3.5" />
                   </button>
@@ -994,7 +1014,7 @@ function TextRoom({
 
       <div className="border-t border-line p-3 bg-bg-elev shadow-inner">
         {replyTarget && (
-          <div className="mb-2 flex items-center justify-between p-2 rounded-xl bg-bg border border-line text-xs animate-in slide-in-from-bottom-2 duration-150">
+          <div className="mb-2 flex items-center justify-between p-2 rounded-xl bg-bg border border-line text-xs">
             <div className="truncate">
               <span className="font-semibold text-accent block">Replying to:</span>
               <span className="text-ink-muted truncate block max-w-md">{replyTarget.body}</span>
@@ -1017,11 +1037,11 @@ function TextRoom({
               }
             }}
             placeholder="Type a message…"
-            className="flex-1 min-w-0 rounded-xl border bg-bg px-4 py-3 text-sm focus:outline-none focus:border-accent"
+            className="flex-1 min-w-0 rounded-xl border bg-bg px-4 py-3 text-sm focus:outline-none"
           />
           <button onClick={() => send()} disabled={!input.trim()} className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent text-white transition disabled:opacity-40"><Send className="h-5 w-5" /></button>
         </div>
-        <button onClick={onNext} className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl border bg-bg py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-bg-muted transition"><Shuffle className="h-4 w-4" /> Next stranger</button>
+        <button onClick={onNext} className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl border bg-bg py-2.5 text-sm font-medium text-ink-muted hover:text-ink transition"><Shuffle className="h-4 w-4" /> Next stranger</button>
       </div>
     </div>
   );
@@ -1035,18 +1055,28 @@ function Footer() {
   );
 }
 
+// Clutterless Profile Modal containing theme switches, credentials, and logout handles
 function EditProfileModal({
   profile,
+  email,
   onClose,
   onRefresh,
+  onSignOut,
+  theme,
+  onToggleTheme,
 }: {
   profile: ExtendedProfile;
+  email: string;
   onClose: () => void;
   onRefresh: () => void;
+  onSignOut: () => void;
+  theme: 'light' | 'dark';
+  onToggleTheme: () => void;
 }) {
   const [name, setName] = useState(profile.display_name || '');
   const [uploading, setUploading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [editing, setEditing] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const handleUpdate = async () => {
@@ -1058,7 +1088,7 @@ function EditProfileModal({
     setSaving(false);
     if (!error) {
       onRefresh();
-      onClose();
+      setEditing(false);
     }
   };
 
@@ -1084,48 +1114,57 @@ function EditProfileModal({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
       <div className="w-full max-w-sm rounded-2xl border border-line bg-bg-elev p-6 shadow-2xl animate-in fade-in zoom-in-95 duration-200">
-        <div className="fixed inset-0" onClick={onClose} />
-        <div className="relative z-10">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-lg font-bold">Profile Settings</h3>
-            <button onClick={onClose} className="text-ink-muted hover:text-ink"><X className="h-5 w-5" /></button>
-          </div>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-lg font-bold tracking-tight">Account & Settings</h3>
+          <button onClick={onClose} className="text-ink-muted hover:text-ink"><X className="h-5 w-5" /></button>
+        </div>
 
-          <div className="flex flex-col items-center gap-3 py-2">
-            <input type="file" ref={fileRef} onChange={handleAvatarChange} accept="image/*" className="hidden" />
+        <div className="flex flex-col items-center gap-3 py-2 border-b border-line pb-4">
+          <input type="file" ref={fileRef} onChange={handleAvatarChange} accept="image/*" className="hidden" />
+          <div className="relative group">
             <button 
               onClick={() => fileRef.current?.click()}
-              className="group relative flex h-24 w-24 items-center justify-center overflow-hidden rounded-full border border-dashed border-line bg-bg"
+              className="flex h-20 w-20 items-center justify-center overflow-hidden rounded-full border border-line bg-bg shadow-sm"
             >
               {profile.avatar_url ? (
                 <img src={profile.avatar_url} alt="Avatar" className="h-full w-full object-cover" />
               ) : (
-                <User className="h-8 w-8 text-ink-faint" />
+                <User className="h-6 w-6 text-ink-faint" />
               )}
-              <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition text-white">
-                {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Edit className="h-4 w-4" />}
+            </button>
+            <button onClick={() => fileRef.current?.click()} className="absolute bottom-0 right-0 p-1.5 rounded-full bg-accent text-white shadow-md"><Camera className="h-3 w-3"/></button>
+          </div>
+          
+          <div className="text-center w-full">
+            {editing ? (
+              <div className="flex gap-2 mt-1 px-2">
+                <input value={name} onChange={(e) => setName(e.target.value)} className="w-full rounded-xl border border-line bg-bg px-3 py-1.5 text-sm outline-none focus:border-accent" />
+                <button onClick={handleUpdate} disabled={saving || !name.trim()} className="bg-accent text-white text-xs font-semibold px-3 py-1.5 rounded-xl">Save</button>
               </div>
+            ) : (
+              <h4 className="text-base font-bold tracking-tight inline-flex items-center gap-1.5">
+                {profile.display_name}
+                <button onClick={() => setEditing(true)} className="text-ink-muted hover:text-ink"><Edit className="h-3.5 w-3.5" /></button>
+              </h4>
+            )}
+            <p className="text-xs text-ink-faint truncate max-w-[280px] mx-auto mt-0.5">{email}</p>
+          </div>
+        </div>
+
+        <div className="space-y-3 mt-4">
+          <div className="flex items-center justify-between p-2 rounded-xl bg-bg border border-line">
+            <span className="text-xs font-semibold text-ink-muted pl-1">Interface Mode</span>
+            <button onClick={onToggleTheme} className="inline-flex h-8 px-3 items-center gap-1.5 rounded-lg border border-line bg-bg-elev text-xs font-medium text-ink-muted transition hover:text-ink">
+              {theme === 'dark' ? <><Sun className="h-3.5 w-3.5" /> Light</> : <><Moon className="h-3.5 w-3.5" /> Dark</>}
             </button>
           </div>
 
-          <div className="space-y-4 mt-2">
-            <div>
-              <label className="text-xs font-semibold text-ink-muted block mb-1">Display Name</label>
-              <input 
-                value={name} 
-                onChange={(e) => setName(e.target.value)}
-                className="w-full rounded-xl border border-line bg-bg px-4 py-2.5 text-sm"
-              />
-            </div>
-
-            <button
-              onClick={handleUpdate}
-              disabled={saving || !name.trim()}
-              className="w-full rounded-xl bg-accent py-2.5 text-sm font-semibold text-white shadow-lg transition active:scale-95 disabled:opacity-50"
-            >
-              {saving ? <Loader2 className="h-4 w-4 animate-spin mx-auto" /> : 'Save Modifications'}
-            </button>
-          </div>
+          <button
+            onClick={onSignOut}
+            className="w-full flex items-center justify-center gap-2 rounded-xl border border-rose-500/20 bg-rose-500/5 hover:bg-rose-500/10 py-2.5 text-sm font-semibold text-rose-500 transition active:scale-95"
+          >
+            <LogOut className="h-4 w-4" /> Sign out account
+          </button>
         </div>
       </div>
     </div>
@@ -1138,7 +1177,7 @@ function formatTime(s: number) {
   return `${m}:${sec.toString().padStart(2, '0')}`;
 }
 
-function LiveChatStats({ currentMode }: { currentMode?: ChatMode }) {
+function LiveChatStats() {
   const [stats, setStats] = useState({
     video: { online: 0, chatting: 0 },
     text: { online: 0, chatting: 0 }
@@ -1149,17 +1188,28 @@ function LiveChatStats({ currentMode }: { currentMode?: ChatMode }) {
     const fetchStats = async () => {
       const [{ data: waiting }, { data: activeConns }] = await Promise.all([
         supabase.from('waiting_room').select('mode'),
-        supabase.from('connections').select('mode').eq('status', 'connected')
+        // Fix: Query updated_at alongside status to verify active interactions
+        supabase.from('connections').select('mode, created_at, updated_at').eq('status', 'connected')
       ]);
 
       if (!active) return;
       const newStats = { video: { online: 0, chatting: 0 }, text: { online: 0, chatting: 0 } };
 
       waiting?.forEach(r => { if (r.mode === 'video' || r.mode === 'text') newStats[r.mode].online++; });
+      
+      const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
+
       activeConns?.forEach(r => {
-        if (r.mode === 'video' || r.mode === 'text') {
-          newStats[r.mode].chatting += 2;
-          newStats[r.mode].online += 2;
+        if (r.mode === 'video') {
+          newStats.video.chatting += 2;
+          newStats.video.online += 2;
+        } else if (r.mode === 'text') {
+          // If the last message exchange update occurred more than 5 minutes ago, they are no longer chatting
+          const lastActive = new Date(r.updated_at || r.created_at).getTime();
+          if (lastActive >= fiveMinutesAgo) {
+            newStats.text.chatting += 2;
+          }
+          newStats.text.online += 2;
         }
       });
       setStats(newStats);
@@ -1178,25 +1228,29 @@ function LiveChatStats({ currentMode }: { currentMode?: ChatMode }) {
     };
   }, []);
 
-  const renderStat = (mode: 'video' | 'text', label: string, Icon: any) => (
-    <div className="flex items-center justify-between rounded-xl border border-line bg-bg-elev p-3 shadow-sm w-full max-w-xs mx-auto mb-2 mt-4">
-      <div className="flex items-center gap-3">
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent/10 text-accent">
-          <Icon className="h-4 w-4" />
-        </div>
-        <div className="flex flex-col text-left">
-          <span className="text-[10px] font-bold text-ink uppercase tracking-wider">{label}</span>
-          <span className="text-[10px] text-ink-muted">{stats[mode].online} Online • <span className="text-accent font-semibold">{stats[mode].chatting} Chatting</span></span>
-        </div>
-      </div>
-      <div className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-    </div>
-  );
-
   return (
-    <div className="w-full flex flex-col items-center">
-      {(!currentMode || currentMode === 'video') && renderStat('video', 'Video Network', Video)}
-      {(!currentMode || currentMode === 'text') && renderStat('text', 'Text Network', MessageSquare)}
+    <div className="w-full flex flex-col items-center sm:flex-row sm:justify-center gap-3">
+      <div className="flex items-center justify-between rounded-xl border border-line bg-bg-elev p-3 shadow-sm w-full max-w-xs mb-2 mt-4">
+        <div className="flex items-center gap-3">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-sky-500/10 text-sky-500"><Video className="h-4 w-4" /></div>
+          <div className="flex flex-col text-left">
+            <span className="text-[10px] font-bold text-ink uppercase tracking-wider">Video Network</span>
+            <span className="text-[10px] text-ink-muted">{stats.video.online} Online • <span className="text-accent font-semibold">{stats.video.chatting} Chatting</span></span>
+          </div>
+        </div>
+        <div className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+      </div>
+
+      <div className="flex items-center justify-between rounded-xl border border-line bg-bg-elev p-3 shadow-sm w-full max-w-xs mb-2 sm:mt-4">
+        <div className="flex items-center gap-3">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-600"><MessageSquare className="h-4 w-4" /></div>
+          <div className="flex flex-col text-left">
+            <span className="text-[10px] font-bold text-ink uppercase tracking-wider">Text Network</span>
+            <span className="text-[10px] text-ink-muted">{stats.text.online} Online • <span className="text-accent font-semibold">{stats.text.chatting} Chatting</span></span>
+          </div>
+        </div>
+        <div className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+      </div>
     </div>
   );
 }
