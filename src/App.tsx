@@ -124,6 +124,7 @@ function ChatApp({
   const modeRef = useRef<ChatMode>('video');
   const connRef = useRef<ConnectionRow | null>(null);
   const connectedAtRef = useRef<number | null>(null);
+  const isInitializingRef = useRef(false);
 
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { connRef.current = conn; }, [conn]);
@@ -161,11 +162,15 @@ function ChatApp({
     return () => { supabase.removeChannel(friendChannel); };
   }, [myId]);
 
-  // Listen for direct phone/video call invitations from connected friends
+  // Listen for direct private buddy calls (ONLY if we are not actively in the matching pool)
   useEffect(() => {
     const channel = supabase.channel(`direct_calls_${myId}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'connections', filter: `responder_id=eq.${myId}` }, async (payload) => {
         const incomingCall = payload.new as ConnectionRow;
+        
+        // FIX: If phase is 'searching' or 'connected', ignore standard pool interceptions
+        if (phase !== 'lobby') return;
+
         if (incomingCall.status === 'pending') {
           setIncomingInvitation(incomingCall);
           const { data } = await supabase.from('profiles').select('*').eq('user_id', incomingCall.initiator_id).maybeSingle();
@@ -185,10 +190,11 @@ function ChatApp({
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
-  }, [myId]);
+  }, [myId, phase]);
 
   const acceptIncomingCall = async () => {
-    if (!incomingInvitation) return;
+    if (!incomingInvitation || isInitializingRef.current) return;
+    isInitializingRef.current = true;
     const directMode = incomingInvitation.mode;
     setMode(directMode);
     setPhase('searching');
@@ -216,7 +222,14 @@ function ChatApp({
     });
     peerRef.current = peer;
     await peer.attachLocalStream(stream);
-    await peer.acceptOffer();
+    try {
+      await peer.acceptOffer();
+    } catch (err) {
+      console.error(err);
+      handleStop();
+    } finally {
+      isInitializingRef.current = false;
+    }
     setIncomingInvitation(null);
   };
 
@@ -266,6 +279,8 @@ function ChatApp({
 
   const startSearching = useCallback(
     async (selectedMode: ChatMode) => {
+      if (isInitializingRef.current) return;
+      
       setError(null);
       setMode(selectedMode);
       setPhase('searching');
@@ -290,7 +305,9 @@ function ChatApp({
 
       unsubIncomingRef.current?.();
       unsubIncomingRef.current = subscribeToIncomingMatches(myId, async (incoming) => {
-        if (peerRef.current) return;
+        if (peerRef.current || isInitializingRef.current) return;
+        isInitializingRef.current = true;
+        
         pushMatchNotification(incoming);
         setConn(incoming);
         setPhase('connected');
@@ -306,12 +323,16 @@ function ChatApp({
           await peer.acceptOffer();
         } catch (err: any) {
           handleNext();
-        }
+        } === true;
+        isInitializingRef.current = false;
       });
 
       try {
         const result = await findMatch(myId, selectedMode);
         if (result) {
+          if (peerRef.current || isInitializingRef.current) return;
+          isInitializingRef.current = true;
+
           pushMatchNotification(result.conn);
           setConn(result.conn);
           setPhase('connected');
@@ -323,17 +344,27 @@ function ChatApp({
           });
           peerRef.current = peer;
           await peer.attachLocalStream(stream);
-          await peer.createOffer();
+          try {
+            await peer.createOffer();
+          } catch (err: any) {
+            handleNext();
+          } finally {
+            isInitializingRef.current = false;
+          }
         }
       } catch (err: any) {
         setError(err.message);
         setPhase('lobby');
+        isInitializingRef.current = false;
       }
     },
     [myId, pushMatchNotification]
   );
 
   const startDirectCall = useCallback(async (friendId: string, directMode: ChatMode) => {
+    if (isInitializingRef.current) return;
+    isInitializingRef.current = true;
+
     setError(null);
     setMode(directMode);
     setPhase('searching');
@@ -357,6 +388,7 @@ function ChatApp({
       } catch (err) {
         setError('Media devices failed.');
         setPhase('lobby');
+        isInitializingRef.current = false;
         return;
       }
     }
@@ -375,6 +407,7 @@ function ChatApp({
         setConn(existing);
         setPhase('connected');
         setConnectedAt(Date.now());
+        isInitializingRef.current = false;
         return;
       }
     }
@@ -393,6 +426,7 @@ function ChatApp({
     if (cErr) {
       setError("Couldn't start call session.");
       setPhase('lobby');
+      isInitializingRef.current = false;
       return;
     }
 
@@ -406,10 +440,17 @@ function ChatApp({
     });
     peerRef.current = peer;
     await peer.attachLocalStream(stream);
-    await peer.createOffer();
+    try {
+      await peer.createOffer();
+    } catch (err) {
+      handleStop();
+    } {
+      isInitializingRef.current = false;
+    }
   }, [myId]);
 
   const handleNext = useCallback(async () => {
+    isInitializingRef.current = false;
     await teardownPeer();
     await leaveWaitingRoom(myId);
     unsubIncomingRef.current?.();
@@ -420,6 +461,7 @@ function ChatApp({
   }, [myId, teardownPeer, startSearching]);
 
   const handleStop = useCallback(async () => {
+    isInitializingRef.current = false;
     await teardownPeer();
     await leaveWaitingRoom(myId);
     unsubIncomingRef.current?.();
@@ -873,7 +915,6 @@ function VideoRoom({
 
       <div className="absolute bottom-6 left-0 right-0 z-20 flex items-center justify-center gap-3 pt-1 px-4 sm:relative sm:bottom-0 sm:bg-transparent sm:px-0">
         <button onClick={onStop} className="inline-flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-black/40 backdrop-blur-md text-white sm:hidden"><ArrowLeft className="h-5 w-5" /></button>
-        {/* FIXED: Mapped explicitly to onToggleCam and onToggleMic custom parameter scope functions */}
         <ControlButton onClick={onToggleCam} active={camOn} label="Cam"><Camera className="h-5 w-5" /></ControlButton>
         <ControlButton onClick={onToggleMic} active={micOn} label={micOn ? 'Mute' : 'Unmute'}><MicIcon safeOn={micOn} /></ControlButton>
         <button onClick={onNext} className="inline-flex h-14 items-center gap-2 rounded-2xl bg-gradient-to-r from-accent to-accent-2 px-7 text-sm font-semibold text-white shadow-lg"><Shuffle className="h-5 w-5" /> Next</button>
@@ -949,7 +990,6 @@ const isImageUrl = (url: string) => {
   return url.match(/\.(jpeg|jpg|gif|png|webp|svg)/i) != null || url.includes('storage.googleapis.com') || url.includes('supabase.co');
 };
 
-// Full attachment link evaluator component rendering helper logic
 function MicIcon({ safeOn }: { safeOn: boolean }) {
   return safeOn ? (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
@@ -1319,4 +1359,3 @@ function LiveChatStats() {
     </div>
   );
 }
-
