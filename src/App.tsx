@@ -29,6 +29,15 @@ export default function App() {
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [friendsDrawerOpen, setFriendsDrawerOpen] = useState(false);
 
+  // Register background push capabilities
+  useEffect(() => {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js')
+        .then(() => console.log('[ServiceWorker] System operational.'))
+        .catch(err => console.error('[ServiceWorker] System registration failed:', err));
+    }
+  }, []);
+
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-bg">
@@ -126,14 +135,53 @@ function ChatApp({
     return () => { if (pruneTimerRef.current) clearInterval(pruneTimerRef.current); };
   }, []);
 
-  const triggerMatchNotification = useCallback(() => {
+  // Listen live to background friend invitations
+  useEffect(() => {
+    const friendChannel = supabase.channel('live_friendships_requests')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'friendships', filter: `friend_id=eq.${myId}` }, async (payload) => {
+        if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+          const { data: sender } = await supabase.from('profiles').select('display_name, avatar_url').eq('user_id', payload.new.user_id).maybeSingle();
+          
+          navigator.serviceWorker.ready.then((reg) => {
+            reg.showNotification("Friend Request Received 🤝", {
+              body: `${sender?.display_name || 'Someone'} wants to add you as a friend!`,
+              icon: sender?.avatar_url || undefined,
+              tag: payload.new.id,
+              data: { friendshipId: payload.new.id },
+              actions: [
+                { action: 'friend_accept', title: 'Accept Request' },
+                { action: 'friend_dismiss', title: 'Dismiss' }
+              ]
+            });
+          });
+        }
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(friendChannel); };
+  }, [myId]);
+
+  // Push notification logic for a successful queue match
+  const pushMatchNotification = useCallback(async (incoming: ConnectionRow) => {
     if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
-      new Notification("Match Found! 🎉", {
-        body: "We paired you up with a user. Open your chat tab now!",
-        icon: profile.avatar_url || undefined
+      const partnerId = incoming.initiator_id === myId ? incoming.responder_id : incoming.initiator_id;
+      const { data: partner } = await supabase.from('profiles').select('display_name, avatar_url').eq('user_id', partnerId).maybeSingle();
+
+      navigator.serviceWorker.ready.then((reg) => {
+        reg.showNotification("Match Secured! 🎉", {
+          body: `We paired you with ${partner?.display_name || 'a stranger'}. Ready to chat?`,
+          icon: partner?.avatar_url || undefined,
+          tag: incoming.id,
+          renotify: true,
+          data: { connectionId: incoming.id },
+          actions: [
+            { action: 'chat_accept', title: 'Open Chat' },
+            { action: 'chat_ignore', title: 'Ignore' }
+          ]
+        });
       });
     }
-  }, [profile]);
+  }, [myId]);
 
   const stopLocalStream = useCallback(() => {
     localStream?.getTracks().forEach((t) => t.stop());
@@ -164,6 +212,7 @@ function ChatApp({
       setRemoteStream(null);
       setConnectedAt(null);
 
+      // Secure runtime push authorizations safely during short user click windows
       if ('Notification' in window && Notification.permission === 'default') {
         Notification.requestPermission().catch(() => {});
       }
@@ -186,7 +235,7 @@ function ChatApp({
       unsubIncomingRef.current?.();
       unsubIncomingRef.current = subscribeToIncomingMatches(myId, async (incoming) => {
         if (peerRef.current) return;
-        triggerMatchNotification();
+        pushMatchNotification(incoming);
         setConn(incoming);
         setPhase('connected');
         setConnectedAt(Date.now());
@@ -207,7 +256,7 @@ function ChatApp({
       try {
         const result = await findMatch(myId, selectedMode);
         if (result) {
-          triggerMatchNotification();
+          pushMatchNotification(result.conn);
           setConn(result.conn);
           setPhase('connected');
           setConnectedAt(Date.now());
@@ -225,7 +274,7 @@ function ChatApp({
         setPhase('lobby');
       }
     },
-    [myId, triggerMatchNotification]
+    [myId, pushMatchNotification]
   );
 
   const startDirectCall = useCallback(async (friendId: string, directMode: ChatMode) => {
@@ -325,20 +374,6 @@ function ChatApp({
     setConnectedAt(null);
     setError(null);
   }, [myId, teardownPeer, stopLocalStream]);
-
-  const toggleCam = useCallback(() => {
-    if (!localStream) return;
-    const newCam = !camOn;
-    localStream.getVideoTracks().forEach((t) => (t.enabled = newCam));
-    setCamOn(newCam);
-  }, [localStream, camOn]);
-
-  const toggleMic = useCallback(() => {
-    if (!localStream) return;
-    const newMic = !micOn;
-    localStream.getAudioTracks().forEach((t) => (t.enabled = newMic));
-    setMicOn(newMic);
-  }, [localStream, micOn]);
 
   return (
     <div className="flex min-h-screen flex-col bg-bg text-ink overflow-x-hidden relative">
@@ -878,7 +913,32 @@ function TextRoom({
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'messages', filter: `connection_id=eq.${conn.id}` },
-        () => { syncMessages(); }
+        (payload) => {
+          const newMsg = payload.new as MessageRow;
+          
+          if (String(newMsg.sender_id) !== String(myId) && document.hidden) {
+            if ('Notification' in window && Notification.permission === 'granted') {
+              navigator.serviceWorker.ready.then((registration) => {
+                registration.showNotification(partnerProfile?.display_name || "New Message", {
+                  body: newMsg.body.startsWith('http') ? "📷 Sent an image attachment" : newMsg.body,
+                  icon: partnerProfile?.avatar_url || undefined,
+                  tag: conn.id,
+                  renotify: true,
+                  data: { connectionId: conn.id, myId: myId },
+                  actions: [
+                    {
+                      action: 'reply',
+                      title: 'Reply',
+                      type: 'text',
+                      placeholder: 'Type your reply here...'
+                    }
+                  ]
+                });
+              });
+            }
+          }
+          syncMessages();
+        }
       )
       .on('broadcast', { event: 'typing' }, (payload) => {
         if (String(payload.payload.senderId) !== String(myId)) {
@@ -893,7 +953,7 @@ function TextRoom({
       supabase.removeChannel(msgChannel);
       if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     };
-  }, [conn.id, myId, syncMessages]);
+  }, [conn.id, myId, syncMessages, partnerProfile]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
