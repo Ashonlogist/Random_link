@@ -23,6 +23,11 @@ type ExtendedMessageRow = MessageRow & {
   reply_body?: string | null;
 };
 
+// Extend local Connection types to include our new explicit metadata column
+type SecureConnectionRow = ConnectionRow & {
+  is_direct?: boolean;
+};
+
 export default function App() {
   const { session, loading, refreshProfile, signOut } = useSession();
   const { theme, toggle } = useTheme();
@@ -106,14 +111,14 @@ function ChatApp({
 }) {
   const [phase, setPhase] = useState<Phase>('lobby');
   const [mode, setMode] = useState<ChatMode>('video');
-  const [conn, setConn] = useState<ConnectionRow | null>(null);
+  const [conn, setConn] = useState<SecureConnectionRow | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [camOn, setCamOn] = useState(true);
   const [micOn, setMicOn] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
-  const [incomingInvitation, setIncomingInvitation] = useState<ConnectionRow | null>(null);
+  const [incomingInvitation, setIncomingInvitation] = useState<SecureConnectionRow | null>(null);
   const [inviterProfile, setInviterProfile] = useState<any | null>(null);
 
   const peerRef = useRef<PeerConnection | null>(null);
@@ -122,7 +127,7 @@ function ChatApp({
   const unsubIncomingRef = useRef<(() => void) | null>(null);
   const pruneTimerRef = useRef<number | null>(null);
   const modeRef = useRef<ChatMode>('video');
-  const connRef = useRef<ConnectionRow | null>(null);
+  const connRef = useRef<SecureConnectionRow | null>(null);
   const connectedAtRef = useRef<number | null>(null);
   const isInitializingRef = useRef(false);
 
@@ -162,14 +167,14 @@ function ChatApp({
     return () => { supabase.removeChannel(friendChannel); };
   }, [myId]);
 
-  // Listen for direct private buddy calls (ONLY if we are not actively in the matching pool)
+  // Listen for direct friend calls (Completely isolated from pool matching updates)
   useEffect(() => {
     const channel = supabase.channel(`direct_calls_${myId}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'connections', filter: `responder_id=eq.${myId}` }, async (payload) => {
-        const incomingCall = payload.new as ConnectionRow;
+        const incomingCall = payload.new as SecureConnectionRow;
         
-        // FIX: If phase is 'searching' or 'connected', ignore standard pool interceptions
-        if (phase !== 'lobby') return;
+        // FIX 1: If it's a random room match, ignore it completely here!
+        if (!incomingCall.is_direct) return;
 
         if (incomingCall.status === 'pending') {
           setIncomingInvitation(incomingCall);
@@ -190,7 +195,7 @@ function ChatApp({
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
-  }, [myId, phase]);
+  }, [myId]);
 
   const acceptIncomingCall = async () => {
     if (!incomingInvitation || isInitializingRef.current) return;
@@ -239,7 +244,7 @@ function ChatApp({
     setIncomingInvitation(null);
   };
 
-  const pushMatchNotification = useCallback(async (incoming: ConnectionRow) => {
+  const pushMatchNotification = useCallback(async (incoming: SecureConnectionRow) => {
     if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
       const partnerId = incoming.initiator_id === myId ? incoming.responder_id : incoming.initiator_id;
       const { data: partner } = await supabase.from('profiles').select('display_name, avatar_url').eq('user_id', partnerId).maybeSingle();
@@ -323,8 +328,9 @@ function ChatApp({
           await peer.acceptOffer();
         } catch (err: any) {
           handleNext();
-        } === true;
-        isInitializingRef.current = false;
+        } finally {
+          isInitializingRef.current = false;
+        }
       });
 
       try {
@@ -398,6 +404,7 @@ function ChatApp({
         .from('connections')
         .select('*')
         .eq('mode', 'text')
+        .eq('is_direct', true) // Only reuse explicitly targeted direct lines
         .or(`and(initiator_id.eq.${myId},responder_id.eq.${friendId}),and(initiator_id.eq.${friendId},responder_id.eq.${myId})`)
         .order('created_at', { ascending: false })
         .limit(1)
@@ -412,6 +419,7 @@ function ChatApp({
       }
     }
 
+    // FIX 2: Set is_direct to true explicitly when initiating direct calls
     const { data: directConn, error: cErr } = await supabase
       .from('connections')
       .insert({
@@ -419,6 +427,7 @@ function ChatApp({
         responder_id: friendId,
         mode: directMode,
         status: 'pending',
+        is_direct: true
       })
       .select()
       .single();
@@ -444,7 +453,7 @@ function ChatApp({
       await peer.createOffer();
     } catch (err) {
       handleStop();
-    } {
+    } finally {
       isInitializingRef.current = false;
     }
   }, [myId]);
@@ -760,7 +769,7 @@ function ChatRoom({
   onStop,
   connectedAt,
 }: {
-  conn: ConnectionRow;
+  conn: SecureConnectionRow;
   myId: string;
   mode: ChatMode;
   localStream: MediaStream | null;
@@ -847,7 +856,7 @@ function VideoRoom({
   onStop,
   partnerProfile,
 }: {
-  conn: ConnectionRow;
+  conn: SecureConnectionRow;
   myId: string;
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
@@ -1008,7 +1017,7 @@ function MicIcon({ safeOn }: { safeOn: boolean }) {
   );
 }
 
-function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: ConnectionRow; myId: string; onNext: () => void; partnerProfile: any; onStop: () => void; }) {
+function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: SecureConnectionRow; myId: string; onNext: () => void; partnerProfile: any; onStop: () => void; }) {
   const [messages, setMessages] = useState<ExtendedMessageRow[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -1153,14 +1162,6 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Connec
   );
 }
 
-function Footer() {
-  return (
-    <footer className="w-full border-t border-line px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] text-center text-xs text-ink-faint">
-      Be respectful. Use Next to skip anyone.
-    </footer>
-  );
-}
-
 function EditProfileModal({
   profile,
   email,
@@ -1276,12 +1277,6 @@ function EditProfileModal({
       </div>
     </div>
   );
-}
-
-function formatTime(s: number) {
-  const m = Math.floor(s / 60);
-  const sec = s % 60;
-  return `${m}:${sec.toString().padStart(2, '0')}`;
 }
 
 function LiveChatStats() {
