@@ -488,11 +488,7 @@ function FriendsPanel({ myId, onDirectCall }: { myId: string; onDirectCall: (id:
     const fetchFriends = async () => {
       const { data, error } = await supabase
         .from('friendships')
-        .select(`
-          status,
-          user_id,
-          friend_id
-        `)
+        .select('*')
         .eq('status', 'accepted');
 
       if (!error && data) {
@@ -500,20 +496,29 @@ function FriendsPanel({ myId, onDirectCall }: { myId: string; onDirectCall: (id:
         if (ids.length > 0) {
           const { data: profiles } = await supabase.from('profiles').select('*').in('user_id', ids);
           if (profiles) setFriends(profiles);
+        } else {
+          setFriends([]);
         }
       }
     };
     fetchFriends();
+
+    // Listen live to real-time additions to the friendship roster
+    const channel = supabase.channel('friendships_lobby')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'friendships' }, fetchFriends)
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
   }, [myId]);
 
   if (friends.length === 0) return null;
 
   return (
-    <div className="mt-10 w-full text-left max-w-xl mx-auto border border-line bg-bg-elev p-4 rounded-2xl">
-      <h3 className="text-sm font-bold uppercase tracking-wider text-ink-muted mb-3">Your Friends</h3>
+    <div className="mt-10 w-full text-left max-w-xl mx-auto border border-line bg-bg-elev p-4 rounded-2xl shadow-md">
+      <h3 className="text-xs font-bold uppercase tracking-wider text-ink-muted mb-3 px-1">Your Connected Friends</h3>
       <div className="space-y-2">
         {friends.map(f => (
-          <div key={f.user_id} className="flex items-center justify-between p-2 rounded-xl bg-bg border border-line">
+          <div key={f.user_id} className="flex items-center justify-between p-2.5 rounded-xl bg-bg border border-line">
             <div className="flex items-center gap-2">
               {f.avatar_url ? (
                 <img src={f.avatar_url} alt="" className="h-8 w-8 rounded-full object-cover" />
@@ -523,8 +528,8 @@ function FriendsPanel({ myId, onDirectCall }: { myId: string; onDirectCall: (id:
               <span className="text-sm font-medium">{f.display_name}</span>
             </div>
             <div className="flex gap-1">
-              <button onClick={() => onDirectCall(f.user_id, 'text')} className="p-2 rounded-lg bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20"><MessageSquare className="h-4 w-4" /></button>
-              <button onClick={() => onDirectCall(f.user_id, 'video')} className="p-2 rounded-lg bg-sky-500/10 text-sky-500 hover:bg-sky-500/20"><Video className="h-4 w-4" /></button>
+              <button onClick={() => onDirectCall(f.user_id, 'text')} className="p-2 rounded-lg bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 transition"><MessageSquare className="h-4 w-4" /></button>
+              <button onClick={() => onDirectCall(f.user_id, 'video')} className="p-2 rounded-lg bg-sky-500/10 text-sky-500 hover:bg-sky-500/20 transition"><Video className="h-4 w-4" /></button>
             </div>
           </div>
         ))}
@@ -707,8 +712,8 @@ function VideoRoom({
           </div>
         )}
 
-        <div className="absolute top-4 left-4 z-20 flex items-center justify-between bg-black/40 backdrop-blur-md px-3 py-2 rounded-2xl border border-white/10 sm:bg-bg-elev/80 sm:border-line">
-          <div className="flex items-center gap-3">
+        <div className="absolute top-4 left-4 right-4 z-20 flex items-center justify-between bg-black/40 backdrop-blur-md px-3 py-2 rounded-2xl border border-white/10 sm:bg-bg-elev/80 sm:border-line">
+          <div className="flex items-center gap-2">
             {partnerProfile?.avatar_url ? (
               <img src={partnerProfile.avatar_url} alt="" className="h-9 w-9 rounded-full object-cover border border-accent" />
             ) : (
@@ -716,12 +721,12 @@ function VideoRoom({
                 <User className="h-4 w-4" />
               </div>
             )}
-            <span className="text-sm font-semibold text-white sm:text-ink">{partnerProfile?.display_name || 'Stranger'}</span>
+            <span className="text-sm font-semibold text-white sm:text-ink max-w-[100px] truncate">{partnerProfile?.display_name || 'Stranger'}</span>
           </div>
           <FriendActionButton myId={myId} partnerId={conn.initiator_id === myId ? conn.responder_id : conn.initiator_id} />
         </div>
 
-        <div className="absolute right-4 top-4 z-20 h-28 w-20 sm:h-32 sm:w-44 overflow-hidden rounded-xl border border-white/20 bg-slate-800 shadow-xl sm:bottom-3 sm:right-3 sm:top-auto">
+        <div className="absolute right-4 bottom-24 z-20 h-28 w-20 sm:h-32 sm:w-44 overflow-hidden rounded-xl border border-white/20 bg-slate-800 shadow-xl sm:bottom-3 sm:right-3">
           <video ref={localVideoRef} autoPlay playsInline muted className="h-full w-full object-cover" />
           <span className="absolute bottom-1 left-1 rounded bg-black/50 px-1.5 py-0.5 text-[10px] text-white">You</span>
         </div>
@@ -740,22 +745,32 @@ function VideoRoom({
 function FriendActionButton({ myId, partnerId }: { myId: string; partnerId: string }) {
   const [fStatus, setFStatus] = useState<'none' | 'pending_sent' | 'pending_received' | 'accepted'>('none');
 
-  useEffect(() => {
-    const checkFriendship = async () => {
-      const { data } = await supabase
-        .from('friendships')
-        .select('*')
-        .or(`and(user_id.eq.${myId},friend_id.eq.${partnerId}),and(user_id.eq.${partnerId},friend_id.eq.${myId})`)
-        .maybeSingle();
+  const checkFriendship = useCallback(async () => {
+    const { data } = await supabase
+      .from('friendships')
+      .select('*')
+      .or(`and(user_id.eq.${myId},friend_id.eq.${partnerId}),and(user_id.eq.${partnerId},friend_id.eq.${myId})`)
+      .maybeSingle();
 
-      if (data) {
-        if (data.status === 'accepted') setFStatus('accepted');
-        else if (data.user_id === myId) setFStatus('none');
-        else setFStatus('pending_received');
-      }
-    };
-    checkFriendship();
+    if (data) {
+      if (data.status === 'accepted') setFStatus('accepted');
+      else if (data.user_id === myId) setFStatus('pending_sent');
+      else setFStatus('pending_received');
+    } else {
+      setFStatus('none');
+    }
   }, [myId, partnerId]);
+
+  useEffect(() => {
+    checkFriendship();
+
+    // Listen live to dynamic realtime updates on the friendship schema changes
+    const channel = supabase.channel(`friendship_room_${partnerId}`)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'friendships' }, checkFriendship)
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [partnerId, checkFriendship]);
 
   const addFriend = async () => {
     if (fStatus === 'none') {
@@ -767,45 +782,12 @@ function FriendActionButton({ myId, partnerId }: { myId: string; partnerId: stri
     }
   };
 
-  if (fStatus === 'accepted') return <span className="ml-3 text-emerald-400 text-xs font-semibold inline-flex items-center gap-1"><Check className="h-3 w-3"/> Friends</span>;
+  if (fStatus === 'accepted') return <span className="text-emerald-400 text-xs font-bold bg-emerald-500/10 px-2 py-1 rounded-xl inline-flex items-center gap-1"><Check className="h-3 w-3"/> Friends</span>;
   return (
-    <button onClick={addFriend} className="ml-4 inline-flex items-center gap-1 bg-accent hover:bg-accent-2 text-white text-xs px-2.5 py-1 rounded-xl transition">
-      <UserPlus className="h-3 w-3" />
+    <button onClick={addFriend} className="inline-flex items-center gap-1 bg-accent hover:bg-accent-2 text-white text-xs font-semibold px-3 py-1.5 rounded-xl transition shadow-sm">
+      <UserPlus className="h-3.5 w-3.5" />
       {fStatus === 'pending_sent' ? 'Sent' : fStatus === 'pending_received' ? 'Accept Friend' : 'Add Friend'}
     </button>
-  );
-}
-
-function ControlButton({ onClick, active, label, children }: { onClick: () => void; active: boolean; label: string; children: any }) {
-  return (
-    <button
-      onClick={onClick}
-      title={label}
-      aria-label={label}
-      className={`inline-flex h-14 w-14 items-center justify-center rounded-2xl border transition active:scale-95 ${
-        active ? 'border-line bg-bg-elev text-ink' : 'border-rose-500/40 bg-rose-500/10 text-rose-500 dark:text-rose-300'
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
-
-function MicIcon({ safeOn }: { safeOn: boolean }) {
-  return safeOn ? (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
-      <rect x="9" y="2" width="6" height="12" rx="3" />
-      <path d="M5 10a7 7 0 0 0 14 0" />
-      <line x1="12" y1="19" x2="12" y2="22" />
-    </svg>
-  ) : (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
-      <line x1="2" y1="2" x2="22" y2="22" />
-      <path d="M9 9v1a3 3 0 0 0 5.12 2.12" />
-      <path d="M15 9.34V5a3 3 0 0 0-5.94-.6" />
-      <path d="M5 10a7 7 0 0 0 10.71 5.95" />
-      <line x1="12" y1="19" x2="12" y2="22" />
-    </svg>
   );
 }
 
@@ -833,37 +815,49 @@ function TextRoom({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const typingTimeoutRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    let active = true;
-    
-    const fetchLatestMessages = () => {
-      supabase
-        .from('messages')
-        .select('*')
-        .eq('connection_id', conn.id)
-        .order('created_at', { ascending: true })
-        .then(({ data }) => {
-          if (active && data) {
-            const mapped: ExtendedMessageRow[] = (data as any[]).map(msg => {
-              if (msg.reply_to_id) {
-                const quoted = data.find(m => m.id === msg.reply_to_id);
-                return { ...msg, reply_body: quoted ? quoted.body : "Original message missing" };
-              }
-              return msg;
-            });
-            setMessages(mapped);
-          }
-        });
-    };
+  const syncMessages = useCallback(async () => {
+    const { data } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('connection_id', conn.id)
+      .order('created_at', { ascending: true });
 
-    fetchLatestMessages();
-    const pollInterval = window.setInterval(fetchLatestMessages, 1500);
+    if (data) {
+      const mapped: ExtendedMessageRow[] = (data as any[]).map(msg => {
+        if (msg.reply_to_id) {
+          const quoted = data.find(m => m.id === msg.reply_to_id);
+          return { ...msg, reply_body: quoted ? quoted.body : "Message unavailable" };
+        }
+        return msg;
+      });
+      setMessages(mapped);
+    }
+  }, [conn.id]);
+
+  useEffect(() => {
+    syncMessages();
+
+    // Listen to real-time additions to the messages list instantly
+    const msgChannel = supabase.channel(`realtime_msg_${conn.id}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'messages', filter: `connection_id=eq.${conn.id}` },
+        () => { syncMessages(); }
+      )
+      .on('broadcast', { event: 'typing' }, (payload) => {
+        if (String(payload.payload.senderId) !== String(myId)) {
+          setIsTyping(true);
+          if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+          typingTimeoutRef.current = window.setTimeout(() => setIsTyping(false), 2000);
+        }
+      })
+      .subscribe();
 
     return () => {
-      active = false;
-      clearInterval(pollInterval);
+      supabase.removeChannel(msgChannel);
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     };
-  }, [conn.id]);
+  }, [conn.id, myId, syncMessages]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
@@ -871,7 +865,7 @@ function TextRoom({
 
   const handleInputChange = (val: string) => {
     setInput(val);
-    supabase.channel(`chat-room-fallback-${conn.id}`).send({
+    supabase.channel(`realtime_msg_${conn.id}`).send({
       type: 'broadcast',
       event: 'typing',
       payload: { senderId: myId }
@@ -897,7 +891,11 @@ function TextRoom({
     const { error } = await supabase.from('messages').insert(payload);
     setSending(false);
     setReplyTarget(null);
-    if (error && !textBody) setInput(body);
+    if (!error) {
+      syncMessages();
+    } else if (!textBody) {
+      setInput(body);
+    }
   };
 
   const handleAttachmentPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -913,7 +911,7 @@ function TextRoom({
         if (data?.publicUrl) await send(data.publicUrl);
       } catch (err) {
         console.error(err);
-      } finaly {
+      } finally {
         setUploading(false);
         if (fileInputRef.current) fileInputRef.current.value = '';
       }
@@ -922,7 +920,7 @@ function TextRoom({
 
   return (
     <div className="flex h-screen sm:h-[68vh] flex-col overflow-hidden sm:rounded-2xl border border-line bg-bg w-full">
-      <div className="flex items-center justify-between p-4 border-b border-line bg-bg-elev">
+      <div className="flex items-center justify-between p-4 border-b border-line bg-bg-elev shadow-sm">
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold">{partnerProfile?.display_name || 'Stranger'}</span>
           <FriendActionButton myId={myId} partnerId={conn.initiator_id === myId ? conn.responder_id : conn.initiator_id} />
@@ -930,7 +928,7 @@ function TextRoom({
         <button onClick={onStop} className="text-xs font-medium text-rose-500 bg-rose-500/10 px-3 py-1.5 rounded-xl">Leave</button>
       </div>
 
-      <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4">
+      <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4 bg-bg-muted/30">
         {messages.length === 0 && (
           <div className="flex h-full flex-col items-center justify-center text-center text-ink-faint">
             <MessageSquare className="h-8 w-8" />
@@ -943,21 +941,21 @@ function TextRoom({
           return (
             <div 
               key={m.id} 
-              className={`flex ${mine ? 'justify-end' : 'justify-start'} group relative`}
+              className={`flex ${mine ? 'justify-end' : 'justify-start'} group`}
             >
               <div className="flex items-center gap-2 max-w-[78%]">
                 {!mine && (
                   <button 
                     onClick={() => setReplyTarget(m)} 
-                    className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg bg-bg-muted border border-line text-ink-muted hover:text-ink transition order-last"
+                    className="opacity-0 group-hover:opacity-100 p-1.5 rounded-xl bg-bg border border-line text-ink-muted hover:text-ink transition order-last shadow-sm"
                     title="Reply to message"
                   >
                     <CornerUpLeft className="h-3.5 w-3.5" />
                   </button>
                 )}
-                <div className={`rounded-2xl px-4 py-2 text-sm relative ${mine ? 'bg-accent text-white shadow-md' : 'bg-bg-muted text-ink border border-line'}`}>
+                <div className={`rounded-2xl px-4 py-2 text-sm shadow-sm ${mine ? 'bg-accent text-white' : 'bg-bg border border-line text-ink'}`}>
                   {m.reply_body && (
-                    <div className="mb-1.5 p-1.5 rounded text-xs bg-black/10 text-ink-muted border-l-2 border-accent truncate max-w-xs">
+                    <div className="mb-1.5 p-1.5 rounded-lg text-[11px] bg-black/5 text-ink-muted border-l-2 border-accent truncate max-w-[200px]">
                       {m.reply_body}
                     </div>
                   )}
@@ -971,7 +969,7 @@ function TextRoom({
                 {mine && (
                   <button 
                     onClick={() => setReplyTarget(m)} 
-                    className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg bg-bg-muted border border-line text-ink-muted hover:text-ink transition"
+                    className="opacity-0 group-hover:opacity-100 p-1.5 rounded-xl bg-bg border border-line text-ink-muted hover:text-ink transition shadow-sm"
                     title="Reply to message"
                   >
                     <CornerUpLeft className="h-3.5 w-3.5" />
@@ -994,19 +992,19 @@ function TextRoom({
         )}
       </div>
 
-      <div className="border-t border-line p-3 bg-bg-elev">
+      <div className="border-t border-line p-3 bg-bg-elev shadow-inner">
         {replyTarget && (
-          <div className="mb-2 flex items-center justify-between p-2 rounded-xl bg-bg border border-line text-xs">
+          <div className="mb-2 flex items-center justify-between p-2 rounded-xl bg-bg border border-line text-xs animate-in slide-in-from-bottom-2 duration-150">
             <div className="truncate">
               <span className="font-semibold text-accent block">Replying to:</span>
               <span className="text-ink-muted truncate block max-w-md">{replyTarget.body}</span>
             </div>
-            <button onClick={() => setReplyTarget(null)} className="text-ink-faint hover:text-ink"><X className="h-4 w-4" /></button>
+            <button onClick={() => setReplyTarget(null)} className="text-ink-faint hover:text-ink p-1"><X className="h-4 w-4" /></button>
           </div>
         )}
         <div className="flex items-center gap-2">
           <input type="file" ref={fileInputRef} onChange={handleAttachmentPick} className="hidden" />
-          <button onClick={() => fileInputRef.current?.click()} className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border bg-bg text-ink-muted">
+          <button onClick={() => fileInputRef.current?.click()} className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border bg-bg text-ink-muted hover:text-ink transition">
             {uploading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Paperclip className="h-5 w-5" />}
           </button>
           <input
@@ -1019,11 +1017,11 @@ function TextRoom({
               }
             }}
             placeholder="Type a message…"
-            className="flex-1 min-w-0 rounded-xl border bg-bg px-4 py-3 text-sm focus:outline-none"
+            className="flex-1 min-w-0 rounded-xl border bg-bg px-4 py-3 text-sm focus:outline-none focus:border-accent"
           />
-          <button onClick={() => send()} disabled={!input.trim()} className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent text-white disabled:opacity-40"><Send className="h-5 w-5" /></button>
+          <button onClick={() => send()} disabled={!input.trim()} className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent text-white transition disabled:opacity-40"><Send className="h-5 w-5" /></button>
         </div>
-        <button onClick={onNext} className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl border bg-bg py-2.5 text-sm font-medium text-ink-muted"><Shuffle className="h-4 w-4" /> Next stranger</button>
+        <button onClick={onNext} className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl border bg-bg py-2.5 text-sm font-medium text-ink-muted hover:text-ink hover:bg-bg-muted transition"><Shuffle className="h-4 w-4" /> Next stranger</button>
       </div>
     </div>
   );
