@@ -686,14 +686,15 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
   }, [isOpen, fetchFriends]);
 
   const handleUnfriend = async (friendId: string) => {
-    if (!window.confirm("Are you sure you want to unfriend this user?")) return;
-    await supabase
-      .from('friendships')
-      .delete()
-      .or(`and(user_id.eq.${myId},friend_id.eq.${friendId}),and(user_id.eq.${friendId},friend_id.eq.${myId})`);
-    fetchFriends();
-  };
-
+  if (!window.confirm("Are you sure you want to unfriend this user?")) return;
+  
+  await supabase
+    .from('friendships')
+    .delete()
+    .or(`and(user_id.eq.${myId},friend_id.eq.${friendId}),and(user_id.eq.${friendId},friend_id.eq.${myId})`);
+    
+  fetchFriends();
+};
   return (
     <>
       {isOpen && <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 transition-opacity" onClick={onClose} />}
