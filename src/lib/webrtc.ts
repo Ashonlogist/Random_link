@@ -113,10 +113,20 @@ export class PeerConnection {
 
   private async subscribeToConnection() {
     if (this.subscribed) return;
+    
+    const channelName = `conn-${this.conn.id}`;
+    const channel = supabase.channel(channelName);
+
+    // FIX: Idempotence guard against multi-binding handlers on active caches
+    if (channel.state === 'joined' || channel.state === 'joining') {
+      console.warn(`[WEBRTC] Channel ${channelName} is already active. Skipping duplicate assignment.`);
+      this.subscribed = true;
+      return;
+    }
+
     this.subscribed = true;
     
-    supabase
-      .channel(`conn-${this.conn.id}`)
+    channel
       .on(
         'postgres_changes',
         { event: 'UPDATE', schema: 'public', table: 'connections', filter: `id=eq.${this.conn.id}` },
@@ -129,7 +139,6 @@ export class PeerConnection {
             return;
           }
 
-          // FIX: Verify that the local description state is actively awaiting an answer
           if (this.isInitiator && row.sdp_answer && this.pc.signalingState === 'have-local-offer') {
             try {
               await this.pc.setRemoteDescription(new RTCSessionDescription(row.sdp_answer));
@@ -141,7 +150,6 @@ export class PeerConnection {
             }
           }
           
-          // Apply ICE candidates only if remote description has been set up successfully
           if (this.pc.remoteDescription) {
             const theirIce = this.isInitiator
               ? (row.ice_candidates_responder ?? [])
@@ -179,34 +187,34 @@ export class PeerConnection {
       .eq('id', this.conn.id);
   }
 
-  // Inside src/lib/webrtc.ts -> close() method
-async close() {
-  if (this.closed) return;
-  this.closed = true;
+  async close() {
+    if (this.closed) return;
+    this.closed = true;
 
-  this.pc.onconnectionstatechange = null;
-  this.pc.onicecandidate = null;
-  this.pc.ontrack = null;
+    this.pc.onconnectionstatechange = null;
+    this.pc.onicecandidate = null;
+    this.pc.ontrack = null;
 
-  try {
-    this.pc.getSenders().forEach((s) => {
-      if (s.track) s.track.stop();
-    });
-  } catch {}
+    try {
+      this.pc.getSenders().forEach((s) => {
+        if (s.track) s.track.stop();
+      });
+    } catch {}
 
-  try { this.pc.close(); } catch {}
-  try {
-    await supabase
-      .from('connections')
-      .update({ status: 'ended', ended_at: new Date().toISOString() })
-      .eq('id', this.conn.id);
-  } catch {}
-  
-  // FIX HERE: Fully remove the channel from the Supabase cache
-  try {
-    const channel = supabase.channel(`conn-${this.conn.id}`);
-    await supabase.removeChannel(channel); 
-  } catch (err) {
-    console.error('[WEBRTC] Error removing channel:', err);
+    try { this.pc.close(); } catch {}
+    try {
+      await supabase
+        .from('connections')
+        .update({ status: 'ended', ended_at: new Date().toISOString() })
+        .eq('id', this.conn.id);
+    } catch {}
+    
+    // FIX: Fully delete the channel instance from global Realtime multiplexer cache
+    try {
+      const activeChannel = supabase.channel(`conn-${this.conn.id}`);
+      await supabase.removeChannel(activeChannel);
+    } catch (err) {
+      console.error('[WEBRTC] Failed to clean up channel cache:', err);
+    }
   }
 }
