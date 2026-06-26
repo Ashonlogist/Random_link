@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Video, MessageSquare, Shuffle, X, Send, Loader2, Camera, ArrowLeft, Sparkles, LogOut, Sun, Moon, Menu, Paperclip, Download, User, Edit, UserPlus, Check, CornerUpLeft } from 'lucide-react';
+import { Video, MessageSquare, Shuffle, X, Send, Loader2, Camera, ArrowLeft, Sparkles, LogOut, Sun, Moon, Menu, Paperclip, User, Edit, UserPlus, Check, CornerUpLeft } from 'lucide-react';
 import { supabase, type ChatMode, type ConnectionRow, type MessageRow, type Profile } from './lib/supabase';
 import { PeerConnection } from './lib/webrtc';
 import {
@@ -164,7 +164,6 @@ function ChatApp({
       setRemoteStream(null);
       setConnectedAt(null);
 
-      // Safe Request Permission inside user interaction event handler
       if ('Notification' in window && Notification.permission === 'default') {
         Notification.requestPermission().catch(() => {});
       }
@@ -238,7 +237,6 @@ function ChatApp({
     setConnectedAt(null);
     setFriendsDrawerOpen(false);
 
-    // Safe request permission here too
     if ('Notification' in window && Notification.permission === 'default') {
       Notification.requestPermission().catch(() => {});
     }
@@ -327,6 +325,20 @@ function ChatApp({
     setConnectedAt(null);
     setError(null);
   }, [myId, teardownPeer, stopLocalStream]);
+
+  const toggleCam = useCallback(() => {
+    if (!localStream) return;
+    const newCam = !camOn;
+    localStream.getVideoTracks().forEach((t) => (t.enabled = newCam));
+    setCamOn(newCam);
+  }, [localStream, camOn]);
+
+  const toggleMic = useCallback(() => {
+    if (!localStream) return;
+    const newMic = !micOn;
+    localStream.getAudioTracks().forEach((t) => (t.enabled = newMic));
+    setMicOn(newMic);
+  }, [localStream, micOn]);
 
   return (
     <div className="flex min-h-screen flex-col bg-bg text-ink overflow-x-hidden relative">
@@ -727,7 +739,6 @@ function VideoRoom({
 
       <div className="absolute bottom-6 left-0 right-0 z-20 flex items-center justify-center gap-3 pt-1 px-4 sm:relative sm:bottom-0 sm:bg-transparent sm:px-0">
         <button onClick={onStop} className="inline-flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-black/40 backdrop-blur-md text-white sm:hidden"><ArrowLeft className="h-5 w-5" /></button>
-        {/* FIX: Use correct onToggleCam instead of typoed toggleCam */}
         <ControlButton onClick={onToggleCam} active={camOn} label="Cam"><Camera className="h-5 w-5" /></ControlButton>
         <ControlButton onClick={onToggleMic} active={micOn} label={micOn ? 'Mute' : 'Unmute'}><MicIcon safeOn={micOn} /></ControlButton>
         <button onClick={onNext} className="inline-flex h-14 items-center gap-2 rounded-2xl bg-gradient-to-r from-accent to-accent-2 px-7 text-sm font-semibold text-white shadow-lg"><Shuffle className="h-5 w-5" /> Next</button>
