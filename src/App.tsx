@@ -137,7 +137,7 @@ function ChatApp({
     return () => { if (pruneTimerRef.current) clearInterval(pruneTimerRef.current); };
   }, []);
 
-  // Listen live to dynamic realtime updates on arriving friend requests
+  // Live background hook tracking arriving peer friendship request modifications
   useEffect(() => {
     const friendChannel = supabase.channel('live_friendships_requests')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'friendships', filter: `friend_id=eq.${myId}` }, async (payload) => {
@@ -161,7 +161,7 @@ function ChatApp({
     return () => { supabase.removeChannel(friendChannel); };
   }, [myId]);
 
-  // Listen for direct phone/video call invitations from connected friends
+  // Live direct background call routing handler to solve loading panel lockups
   useEffect(() => {
     const channel = supabase.channel(`direct_calls_${myId}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'connections', filter: `responder_id=eq.${myId}` }, async (payload) => {
@@ -203,7 +203,7 @@ function ChatApp({
         });
         setLocalStream(stream);
       } catch (err) {
-        console.error("Camera direct initialization exception:", err);
+        console.error("Media feed tracking failure:", err);
       }
     }
 
@@ -637,7 +637,7 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
           ) : friends.length === 0 ? (
             <div className="text-center text-ink-faint py-10">
               <User className="h-8 w-8 mx-auto opacity-40 mb-2"/>
-              <p className="text-sm">No connected friends yet. Add strangers during chat to build your list!</p>
+              <p className="text-sm">No connected friends yet. Add strangers during chat to build your friend list!</p>
             </div>
           ) : (
             friends.map(f => (
@@ -651,8 +651,8 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
                   <span className="text-sm font-semibold tracking-tight">{f.display_name}</span>
                 </div>
                 <div className="flex gap-1.5">
-                  <button onClick={() => onDirectCall(f.user_id, 'text')} className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 transition"><MessageSquare className="h-4 w-4" /></button>
-                  <button onClick={() => onDirectCall(f.user_id, 'video')} className="p-2.5 rounded-xl bg-sky-500/10 text-sky-500 hover:bg-sky-500/20 transition"><Video className="h-4 w-4" /></button>
+                  <button onClick={() => onDirectCall(f.user_id, 'text')} className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 transition" title="Text Chat"><MessageSquare className="h-4 w-4" /></button>
+                  <button onClick={() => onDirectCall(f.user_id, 'video')} className="p-2.5 rounded-xl bg-sky-500/10 text-sky-500 hover:bg-sky-500/20 transition" title="Video Call"><Video className="h-4 w-4" /></button>
                 </div>
               </div>
             ))
@@ -859,7 +859,7 @@ function VideoRoom({
 
       <div className="absolute bottom-6 left-0 right-0 z-20 flex items-center justify-center gap-3 pt-1 px-4 sm:relative sm:bottom-0 sm:bg-transparent sm:px-0">
         <button onClick={onStop} className="inline-flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-black/40 backdrop-blur-md text-white sm:hidden"><ArrowLeft className="h-5 w-5" /></button>
-        {/* FIXED: Mapped onClick events directly to onToggleCam and onToggleMic parameters from props wrapper context */}
+        {/* FIXED PROP NAMESPACE CALLS: correctly calling onToggleCam and onToggleMic from props scoping */}
         <ControlButton onClick={onToggleCam} active={camOn} label="Cam"><Camera className="h-5 w-5" /></ControlButton>
         <ControlButton onClick={onToggleMic} active={micOn} label={micOn ? 'Mute' : 'Unmute'}><MicIcon safeOn={micOn} /></ControlButton>
         <button onClick={onNext} className="inline-flex h-14 items-center gap-2 rounded-2xl bg-gradient-to-r from-accent to-accent-2 px-7 text-sm font-semibold text-white shadow-lg"><Shuffle className="h-5 w-5" /> Next</button>
@@ -1195,7 +1195,7 @@ function EditProfileModal({
                 <button onClick={handleUpdate} disabled={saving || !name.trim()} className="bg-accent text-white text-xs font-semibold px-3 py-1.5 rounded-xl">Save</button>
               </div>
             ) : (
-              <h4 className="text-base font-bold tracking-tight inline-flex items-center gap-1.5">
+              <h4 className="text-base font-bold flex items-center gap-1.5">
                 {profile.display_name}
                 <button onClick={() => setEditing(true)} className="text-ink-muted hover:text-ink"><Edit className="h-3.5 w-3.5" /></button>
               </h4>
