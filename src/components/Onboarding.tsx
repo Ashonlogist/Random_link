@@ -74,40 +74,38 @@ export function Onboarding({
     else if (step === 'school') setStep('institution');
     else if (step === 'avatar') setStep('school');
   };
-
-  const finish = async () => {
+const finish = async () => {
     setError(null);
     setLoading(true);
-    
-    // DEBUG: Add these two lines to your code
-    console.log("Avatar File:", avatarFile);
-    console.log("User ID:", userId);
-
     let uploadedAvatarUrl: string | null = null;
-    // ... rest of your code
 
-    // 1. Try to upload the avatar, but don't let it block the profile creation
-    // Inside src/components/Onboarding.tsx, in the finish function:
+    // Log the file details inside the component scope
+    console.log("DEBUG: Avatar File object:", avatarFile);
+    console.log("DEBUG: File Name:", avatarFile?.name);
+    console.log("DEBUG: File Type:", avatarFile?.type);
 
-if (avatarFile) {
-  const fileExt = avatarFile.name.split('.').pop();
-  const filePath = `${userId}-${Math.random()}.${fileExt}`;
-
-  // ADDED: Explicit contentType
-  const { error: uploadError } = await supabase.storage
-    .from('avatars')
-    .upload(filePath, avatarFile, { 
-      upsert: true,
-      contentType: avatarFile.type // This helps Supabase parse the file correctly
-    });
-
-  if (uploadError) throw uploadError;
-
-  const { data } = supabase.storage.from('avatars').getPublicUrl(filePath);
-  uploadedAvatarUrl = data?.publicUrl || null;
-}
-    // 2. Always create the profile, regardless of whether the avatar uploaded
     try {
+      if (avatarFile) {
+        const fileExt = avatarFile.name.split('.').pop();
+        // Sanitize the file path to ensure no special characters cause 400 errors
+        const filePath = `${userId}/${Date.now()}.${fileExt}`;
+
+        const { error: uploadError, data: uploadData } = await supabase.storage
+          .from('avatars')
+          .upload(filePath, avatarFile, { 
+            upsert: true,
+            contentType: avatarFile.type 
+          });
+
+        if (uploadError) {
+          console.error("DEBUG: Upload error details:", uploadError);
+          throw uploadError;
+        }
+
+        const { data } = supabase.storage.from('avatars').getPublicUrl(filePath);
+        uploadedAvatarUrl = data?.publicUrl || null;
+      }
+
       const { error } = await supabase.from('profiles').insert({
         user_id: userId,
         display_name: displayName.trim(),
@@ -120,13 +118,13 @@ if (avatarFile) {
       if (error) throw error;
       onDone();
     } catch (err: any) {
+      console.error("DEBUG: Finish process failed:", err);
       setError(err.message || 'Failed to save profile.');
     } finally {
       setLoading(false);
     }
   };
-
-  return (
+    return (
     <div className="relative flex min-h-screen items-center justify-center bg-bg px-4 py-10">
       <button
         onClick={onToggleTheme}
