@@ -137,7 +137,7 @@ function ChatApp({
     return () => { if (pruneTimerRef.current) clearInterval(pruneTimerRef.current); };
   }, []);
 
-  // Live background hook tracking arriving peer friendship request modifications
+  // Listen live to dynamic realtime updates on arriving friend requests
   useEffect(() => {
     const friendChannel = supabase.channel('live_friendships_requests')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'friendships', filter: `friend_id=eq.${myId}` }, async (payload) => {
@@ -161,7 +161,7 @@ function ChatApp({
     return () => { supabase.removeChannel(friendChannel); };
   }, [myId]);
 
-  // Live direct background call routing handler to solve loading panel lockups
+  // Listen for direct phone/video call invitations from connected friends
   useEffect(() => {
     const channel = supabase.channel(`direct_calls_${myId}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'connections', filter: `responder_id=eq.${myId}` }, async (payload) => {
@@ -203,7 +203,7 @@ function ChatApp({
         });
         setLocalStream(stream);
       } catch (err) {
-        console.error("Media feed tracking failure:", err);
+        console.error("Camera direct initialization exception:", err);
       }
     }
 
@@ -272,6 +272,10 @@ function ChatApp({
       setConn(null);
       setRemoteStream(null);
       setConnectedAt(null);
+
+      if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission().catch(() => {});
+      }
 
       let stream: MediaStream | null = null;
       if (selectedMode === 'video') {
@@ -354,7 +358,7 @@ function ChatApp({
           audio: { echoCancellation: true, noiseSuppression: true },
         });
         setLocalStream(stream);
-      } catch (err) {
+      } catch (err: any) {
         setError('Media devices failed.');
         setPhase('lobby');
         return;
@@ -430,6 +434,20 @@ function ChatApp({
     setConnectedAt(null);
     setError(null);
   }, [myId, teardownPeer, stopLocalStream]);
+
+  const toggleCam = useCallback(() => {
+    if (!localStream) return;
+    const newCam = !camOn;
+    localStream.getVideoTracks().forEach((t) => (t.enabled = newCam));
+    setCamOn(newCam);
+  }, [localStream, camOn]);
+
+  const toggleMic = useCallback(() => {
+    if (!localStream) return;
+    const newMic = !micOn;
+    localStream.getAudioTracks().forEach((t) => (t.enabled = newMic));
+    setMicOn(newMic);
+  }, [localStream, micOn]);
 
   return (
     <div className="flex min-h-screen flex-col bg-bg text-ink overflow-x-hidden relative">
@@ -637,7 +655,7 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
           ) : friends.length === 0 ? (
             <div className="text-center text-ink-faint py-10">
               <User className="h-8 w-8 mx-auto opacity-40 mb-2"/>
-              <p className="text-sm">No connected friends yet. Add strangers during chat to build your friend list!</p>
+              <p className="text-sm">No connected friends yet. Add strangers during chat to build your list!</p>
             </div>
           ) : (
             friends.map(f => (
@@ -651,8 +669,8 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
                   <span className="text-sm font-semibold tracking-tight">{f.display_name}</span>
                 </div>
                 <div className="flex gap-1.5">
-                  <button onClick={() => onDirectCall(f.user_id, 'text')} className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 transition" title="Text Chat"><MessageSquare className="h-4 w-4" /></button>
-                  <button onClick={() => onDirectCall(f.user_id, 'video')} className="p-2.5 rounded-xl bg-sky-500/10 text-sky-500 hover:bg-sky-500/20 transition" title="Video Call"><Video className="h-4 w-4" /></button>
+                  <button onClick={() => onDirectCall(f.user_id, 'text')} className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 transition"><MessageSquare className="h-4 w-4" /></button>
+                  <button onClick={() => onDirectCall(f.user_id, 'video')} className="p-2.5 rounded-xl bg-sky-500/10 text-sky-500 hover:bg-sky-500/20 transition"><Video className="h-4 w-4" /></button>
                 </div>
               </div>
             ))
@@ -931,7 +949,6 @@ function ControlButton({ onClick, active, label, children }: { onClick: () => vo
   );
 }
 
-// Full canonical asset evaluation block helper
 const isImageUrl = (url: string) => {
   return url.match(/\.(jpeg|jpg|gif|png|webp|svg)/i) != null || url.includes('storage.googleapis.com') || url.includes('supabase.co');
 };
@@ -1195,7 +1212,7 @@ function EditProfileModal({
                 <button onClick={handleUpdate} disabled={saving || !name.trim()} className="bg-accent text-white text-xs font-semibold px-3 py-1.5 rounded-xl">Save</button>
               </div>
             ) : (
-              <h4 className="text-base font-bold flex items-center gap-1.5">
+              <h4 className="text-base font-bold tracking-tight inline-flex items-center gap-1.5">
                 {profile.display_name}
                 <button onClick={() => setEditing(true)} className="text-ink-muted hover:text-ink"><Edit className="h-3.5 w-3.5" /></button>
               </h4>
