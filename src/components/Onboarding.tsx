@@ -80,21 +80,26 @@ export function Onboarding({
     setLoading(true);
     let uploadedAvatarUrl: string | null = null;
 
-    try {
-      if (avatarFile) {
+    // 1. Try to upload the avatar, but don't let it block the profile creation
+    if (avatarFile) {
+      try {
         const fileExt = avatarFile.name.split('.').pop();
         const filePath = `${userId}-${Math.random()}.${fileExt}`;
-
         const { error: uploadError } = await supabase.storage
           .from('avatars')
           .upload(filePath, avatarFile, { upsert: true });
 
-        if (uploadError) throw uploadError;
-
-        const { data } = supabase.storage.from('avatars').getPublicUrl(filePath);
-        uploadedAvatarUrl = data?.publicUrl || null;
+        if (!uploadError) {
+          const { data } = supabase.storage.from('avatars').getPublicUrl(filePath);
+          uploadedAvatarUrl = data?.publicUrl || null;
+        }
+      } catch (e) {
+        console.warn('Avatar upload failed, but proceeding with profile creation:', e);
       }
+    }
 
+    // 2. Always create the profile, regardless of whether the avatar uploaded
+    try {
       const { error } = await supabase.from('profiles').insert({
         user_id: userId,
         display_name: displayName.trim(),
@@ -112,7 +117,7 @@ export function Onboarding({
       setLoading(false);
     }
   };
-
+  
   return (
     <div className="relative flex min-h-screen items-center justify-center bg-bg px-4 py-10">
       <button
