@@ -273,10 +273,6 @@ function ChatApp({
       setRemoteStream(null);
       setConnectedAt(null);
 
-      if ('Notification' in window && Notification.permission === 'default') {
-        Notification.requestPermission().catch(() => {});
-      }
-
       let stream: MediaStream | null = null;
       if (selectedMode === 'video') {
         try {
@@ -358,7 +354,7 @@ function ChatApp({
           audio: { echoCancellation: true, noiseSuppression: true },
         });
         setLocalStream(stream);
-      } catch (err: any) {
+      } catch (err) {
         setError('Media devices failed.');
         setPhase('lobby');
         return;
@@ -655,7 +651,7 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
           ) : friends.length === 0 ? (
             <div className="text-center text-ink-faint py-10">
               <User className="h-8 w-8 mx-auto opacity-40 mb-2"/>
-              <p className="text-sm">No connected friends yet. Add strangers during chat to build your list!</p>
+              <p className="text-sm">No connected friends yet. Add strangers during chat to build your friend list!</p>
             </div>
           ) : (
             friends.map(f => (
@@ -669,8 +665,8 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
                   <span className="text-sm font-semibold tracking-tight">{f.display_name}</span>
                 </div>
                 <div className="flex gap-1.5">
-                  <button onClick={() => onDirectCall(f.user_id, 'text')} className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 transition"><MessageSquare className="h-4 w-4" /></button>
-                  <button onClick={() => onDirectCall(f.user_id, 'video')} className="p-2.5 rounded-xl bg-sky-500/10 text-sky-500 hover:bg-sky-500/20 transition"><Video className="h-4 w-4" /></button>
+                  <button onClick={() => onDirectCall(f.user_id, 'text')} className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 transition" title="Text Chat"><MessageSquare className="h-4 w-4" /></button>
+                  <button onClick={() => onDirectCall(f.user_id, 'video')} className="p-2.5 rounded-xl bg-sky-500/10 text-sky-500 hover:bg-sky-500/20 transition" title="Video Call"><Video className="h-4 w-4" /></button>
                 </div>
               </div>
             ))
@@ -877,7 +873,7 @@ function VideoRoom({
 
       <div className="absolute bottom-6 left-0 right-0 z-20 flex items-center justify-center gap-3 pt-1 px-4 sm:relative sm:bottom-0 sm:bg-transparent sm:px-0">
         <button onClick={onStop} className="inline-flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-black/40 backdrop-blur-md text-white sm:hidden"><ArrowLeft className="h-5 w-5" /></button>
-        {/* FIXED PROP NAMESPACE CALLS: correctly calling onToggleCam and onToggleMic from props scoping */}
+        {/* FIXED: Mapped explicitly to onToggleCam and onToggleMic custom parameter scope functions */}
         <ControlButton onClick={onToggleCam} active={camOn} label="Cam"><Camera className="h-5 w-5" /></ControlButton>
         <ControlButton onClick={onToggleMic} active={micOn} label={micOn ? 'Mute' : 'Unmute'}><MicIcon safeOn={micOn} /></ControlButton>
         <button onClick={onNext} className="inline-flex h-14 items-center gap-2 rounded-2xl bg-gradient-to-r from-accent to-accent-2 px-7 text-sm font-semibold text-white shadow-lg"><Shuffle className="h-5 w-5" /> Next</button>
@@ -953,6 +949,7 @@ const isImageUrl = (url: string) => {
   return url.match(/\.(jpeg|jpg|gif|png|webp|svg)/i) != null || url.includes('storage.googleapis.com') || url.includes('supabase.co');
 };
 
+// Full attachment link evaluator component rendering helper logic
 function MicIcon({ safeOn }: { safeOn: boolean }) {
   return safeOn ? (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
@@ -1212,7 +1209,7 @@ function EditProfileModal({
                 <button onClick={handleUpdate} disabled={saving || !name.trim()} className="bg-accent text-white text-xs font-semibold px-3 py-1.5 rounded-xl">Save</button>
               </div>
             ) : (
-              <h4 className="text-base font-bold tracking-tight inline-flex items-center gap-1.5">
+              <h4 className="text-base font-bold flex items-center gap-1.5">
                 {profile.display_name}
                 <button onClick={() => setEditing(true)} className="text-ink-muted hover:text-ink"><Edit className="h-3.5 w-3.5" /></button>
               </h4>
@@ -1322,3 +1319,4 @@ function LiveChatStats() {
     </div>
   );
 }
+
