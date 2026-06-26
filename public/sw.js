@@ -1,24 +1,14 @@
 // public/sw.js
+const SUPABASE_URL = "https://qqutsylqpkgghmehndjm.supabase.co";
+const SUPABASE_KEY = "sb_publishable_PaZX8ccAVYRQvlYSgd8p2A_0P2k9VTS";
+
 self.addEventListener('notificationclick', function(event) {
   event.notification.close();
-  
   const action = event.action;
-  const notificationData = event.notification.data || {};
-  const { connectionId, myId, partnerId, friendshipId } = notificationData;
+  const connectionId = event.notification.data?.connectionId;
+  const myId = event.notification.data?.myId;
 
-  // Supabase REST Configurations (Replace with your actual keys)
-  const supabaseUrl = "https://qqutsylqpkgghmehndjm.supabase.co";
-  const supabaseKey = "sb_publishable_PaZX8ccAVYRQvlYSgd8p2A_0P2k9VTS";
-
-  const headers = {
-    'apikey': supabaseKey,
-    'Authorization': `Bearer ${supabaseKey}`,
-    'Content-Type': 'application/json',
-    'Prefer': 'return=minimal'
-  };
-
-  // Handle Match Found Actions
-  if (action === 'chat_accept') {
+  if (action === 'chat_accept' || !action) {
     event.waitUntil(
       clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(clientList) {
         for (let client of clientList) {
@@ -27,55 +17,23 @@ self.addEventListener('notificationclick', function(event) {
         if (clients.openWindow) return clients.openWindow('/');
       })
     );
-    return;
   }
 
-  if (action === 'chat_ignore') {
-    event.waitUntil(
-      fetch(`${supabaseUrl}/rest/v1/connections?id=eq.${connectionId}`, {
-        method: 'PATCH',
-        headers: headers,
-        body: JSON.stringify({ status: 'ended', ended_at: new Date().toISOString() })
-      }).catch(err => console.error('[SW] Ignore match failed:', err))
-    );
-    return;
-  }
-
-  // Handle Inline DM Replies
   if (action === 'reply' && event.reply) {
     event.waitUntil(
-      fetch(`${supabaseUrl}/rest/v1/messages`, {
+      fetch(`${SUPABASE_URL}/rest/v1/messages`, {
         method: 'POST',
-        headers: headers,
+        headers: {
+          'apikey': SUPABASE_KEY,
+          'Authorization': `Bearer ${SUPABASE_KEY}`,
+          'Content-Type': 'application/json'
+        },
         body: JSON.stringify({
           connection_id: connectionId,
           sender_id: myId,
           body: event.reply
         })
-      }).catch(err => console.error('[SW] DM quick reply failed:', err))
+      }).catch(err => console.error('[SW Error]', err))
     );
-    return;
   }
-
-  // Handle Friend Request Notifications
-  if (action === 'friend_accept') {
-    event.waitUntil(
-      fetch(`${supabaseUrl}/rest/v1/friendships?id=eq.${friendshipId}`, {
-        method: 'PATCH',
-        headers: headers,
-        body: JSON.stringify({ status: 'accepted' })
-      }).catch(err => console.error('[SW] Accept friend request failed:', err))
-    );
-    return;
-  }
-
-  // Default fallback: Focus or Open App Window
-  event.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function(clientList) {
-      for (let client of clientList) {
-        if ('focus' in client) return client.focus();
-      }
-      if (clients.openWindow) return clients.openWindow('/');
-    })
-  );
 });
