@@ -1,15 +1,8 @@
 import type { ConnectionRow } from './supabase';
 import { supabase } from './supabase';
 
-// Reduced STUN footprint and prepared TURN entry array to satisfy strict browser NAT traversal requirements
 const ICE_SERVERS: RTCIceServer[] = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  // OPTIONAL: Add your free TURN credentials here if mobile carrier firewalls continue to block connections:
-  // {
-  //   urls: 'turn:your-turn-server.com:3478',
-  //   username: 'your_username',
-  //   credential: 'your_password'
-  // }
+  { urls: 'stun:stun.l.google.com:19302' }
 ];
 
 export type PeerEvents = {
@@ -136,25 +129,29 @@ export class PeerConnection {
             return;
           }
 
-          if (this.isInitiator && row.sdp_answer && !this.pc.currentRemoteDescription) {
+          // FIX: Verify that the local description state is actively awaiting an answer
+          if (this.isInitiator && row.sdp_answer && this.pc.signalingState === 'have-local-offer') {
             try {
               await this.pc.setRemoteDescription(new RTCSessionDescription(row.sdp_answer));
               for (const c of row.ice_candidates_responder ?? []) {
                 try { await this.pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
               }
             } catch (err: any) {
-              this.events.onError?.(new Error('Remote desc assignment failed: ' + err.message));
+              console.warn('[WEBRTC] Handled secondary description attempt:', err.message);
             }
           }
           
-          const theirIce = this.isInitiator
-            ? (row.ice_candidates_responder ?? [])
-            : (row.ice_candidates_initiator ?? []);
-            
-          for (const c of theirIce) {
-            if (!this.pendingIce.find((x) => x.candidate === c.candidate)) {
-              this.pendingIce.push(c);
-              try { await this.pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
+          // Apply ICE candidates only if remote description has been set up successfully
+          if (this.pc.remoteDescription) {
+            const theirIce = this.isInitiator
+              ? (row.ice_candidates_responder ?? [])
+              : (row.ice_candidates_initiator ?? []);
+              
+            for (const c of theirIce) {
+              if (!this.pendingIce.find((x) => x.candidate === c.candidate)) {
+                this.pendingIce.push(c);
+                try { await this.pc.addIceCandidate(new RTCIceCandidate(c)); } catch {}
+              }
             }
           }
         }
@@ -172,6 +169,8 @@ export class PeerConnection {
       
     if (error) throw error;
     const arr = ((data as Record<string, any> | null)?.[field] as any[]) ?? [];
+    
+    if (arr.some((x) => x.candidate === candidate.candidate)) return;
     arr.push(candidate);
     
     await supabase
