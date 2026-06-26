@@ -16,8 +16,7 @@ import {
   Send, 
   XCircle, 
   User, 
-  VideoOff, 
-  Volume2
+  VideoOff
 } from 'lucide-react';
 
 type AppState = 'idle' | 'searching' | 'connected';
