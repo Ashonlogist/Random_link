@@ -85,27 +85,25 @@ const finish = async () => {
     console.log("DEBUG: File Type:", avatarFile?.type);
 
     try {
-      if (avatarFile) {
-        const fileExt = avatarFile.name.split('.').pop();
-        // Sanitize the file path to ensure no special characters cause 400 errors
-        const filePath = `${userId}/${Date.now()}.${fileExt}`;
+      // Inside src/components/Onboarding.tsx -> finish function
+if (avatarFile) {
+  const fileExt = avatarFile.name.split('.').pop();
+  
+  // FIXED: Changed the dash (-) to a forward slash (/) to create a subfolder structure
+  const filePath = `${userId}/${Date.now()}.${fileExt}`;
 
-        const { error: uploadError, data: uploadData } = await supabase.storage
-          .from('avatars')
-          .upload(filePath, avatarFile, { 
-            upsert: true,
-            contentType: avatarFile.type 
-          });
+  const { error: uploadError } = await supabase.storage
+    .from('avatars')
+    .upload(filePath, avatarFile, { 
+      upsert: true,
+      contentType: avatarFile.type
+    });
 
-        if (uploadError) {
-          console.error("DEBUG: Upload error details:", uploadError);
-          throw uploadError;
-        }
+  if (uploadError) throw uploadError;
 
-        const { data } = supabase.storage.from('avatars').getPublicUrl(filePath);
-        uploadedAvatarUrl = data?.publicUrl || null;
-      }
-
+  const { data } = supabase.storage.from('avatars').getPublicUrl(filePath);
+  uploadedAvatarUrl = data?.publicUrl || null;
+}
       const { error } = await supabase.from('profiles').insert({
         user_id: userId,
         display_name: displayName.trim(),
