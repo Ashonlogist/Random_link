@@ -179,27 +179,34 @@ export class PeerConnection {
       .eq('id', this.conn.id);
   }
 
-  async close() {
-    if (this.closed) return;
-    this.closed = true;
+  // Inside src/lib/webrtc.ts -> close() method
+async close() {
+  if (this.closed) return;
+  this.closed = true;
 
-    this.pc.onconnectionstatechange = null;
-    this.pc.onicecandidate = null;
-    this.pc.ontrack = null;
+  this.pc.onconnectionstatechange = null;
+  this.pc.onicecandidate = null;
+  this.pc.ontrack = null;
 
-    try {
-      this.pc.getSenders().forEach((s) => {
-        if (s.track) s.track.stop();
-      });
-    } catch {}
+  try {
+    this.pc.getSenders().forEach((s) => {
+      if (s.track) s.track.stop();
+    });
+  } catch {}
 
-    try { this.pc.close(); } catch {}
-    try {
-      await supabase
-        .from('connections')
-        .update({ status: 'ended', ended_at: new Date().toISOString() })
-        .eq('id', this.conn.id);
-    } catch {}
-    try { await supabase.channel(`conn-${this.conn.id}`).unsubscribe(); } catch {}
+  try { this.pc.close(); } catch {}
+  try {
+    await supabase
+      .from('connections')
+      .update({ status: 'ended', ended_at: new Date().toISOString() })
+      .eq('id', this.conn.id);
+  } catch {}
+  
+  // FIX HERE: Fully remove the channel from the Supabase cache
+  try {
+    const channel = supabase.channel(`conn-${this.conn.id}`);
+    await supabase.removeChannel(channel); 
+  } catch (err) {
+    console.error('[WEBRTC] Error removing channel:', err);
   }
 }
