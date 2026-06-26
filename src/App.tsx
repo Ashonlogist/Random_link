@@ -742,6 +742,32 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
   );
 }
 
+function Searching({ mode, onCancel }: { mode: ChatMode; onCancel: () => void }) {
+  return (
+    <div className="flex flex-col items-center text-center">
+      <div className="relative flex h-24 w-24 items-center justify-center">
+        <div className="absolute inset-0 animate-ping rounded-full bg-accent/20" />
+        <div className="absolute inset-2 animate-pulse rounded-full bg-accent/30" />
+        <div className="relative flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-accent to-accent-2 text-white">
+          {mode === 'video' ? <Video className="h-7 w-7" /> : <MessageSquare className="h-7 w-7" />}
+        </div>
+      </div>
+      <h2 className="mt-6 text-2xl font-semibold">Looking…</h2>
+      <p className="mt-2 text-sm text-ink-muted">Finding someone for you.</p>
+
+      <LiveChatStats />
+
+      <button
+        onClick={onCancel}
+        className="mt-8 inline-flex items-center gap-2 rounded-xl border border-line bg-bg-elev px-5 py-2.5 text-sm font-medium text-ink-muted transition hover:text-ink"
+      >
+        <X className="h-4 w-4" /> Cancel
+      </button>
+    </div>
+  );
+}
+
+
 function ChatRoom({
   conn,
   myId,
