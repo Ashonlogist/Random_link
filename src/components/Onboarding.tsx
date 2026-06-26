@@ -78,7 +78,13 @@ export function Onboarding({
   const finish = async () => {
     setError(null);
     setLoading(true);
+    
+    // DEBUG: Add these two lines to your code
+    console.log("Avatar File:", avatarFile);
+    console.log("User ID:", userId);
+
     let uploadedAvatarUrl: string | null = null;
+    // ... rest of your code
 
     // 1. Try to upload the avatar, but don't let it block the profile creation
     if (avatarFile) {
@@ -117,7 +123,7 @@ export function Onboarding({
       setLoading(false);
     }
   };
-  
+
   return (
     <div className="relative flex min-h-screen items-center justify-center bg-bg px-4 py-10">
       <button
