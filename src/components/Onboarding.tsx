@@ -75,47 +75,48 @@ export function Onboarding({
     else if (step === 'avatar') setStep('school');
   };
 
-  const finish = async () => {
-    setError(null);
-    setLoading(true);
-    let uploadedAvatarUrl: string | null = null;
+  // Inside src/components/Onboarding.tsx -> replace the filePath definition inside finish():
+const finish = async () => {
+  setError(null);
+  setLoading(true);
+  let uploadedAvatarUrl: string | null = null;
 
-    try {
-      if (avatarFile) {
-        const fileExt = avatarFile.name.split('.').pop();
-        const filePath = `${userId}/${Date.now()}.${fileExt}`;
+  try {
+    if (avatarFile) {
+      const fileExt = avatarFile.name.split('.').pop();
+      // FIX: Standardize route patterns to allow correct upload permissions mapping
+      const filePath = `${userId}/${Date.now()}.${fileExt}`;
 
-        const { error: uploadError } = await supabase.storage
-          .from('avatars')
-          .upload(filePath, avatarFile, { 
-            upsert: true,
-            contentType: avatarFile.type 
-          });
+      const { error: uploadError } = await supabase.storage
+        .from('avatars')
+        .upload(filePath, avatarFile, { 
+          upsert: true,
+          contentType: avatarFile.type 
+        });
 
-        if (uploadError) throw uploadError;
+      if (uploadError) throw uploadError;
 
-        const { data } = supabase.storage.from('avatars').getPublicUrl(filePath);
-        uploadedAvatarUrl = data?.publicUrl || null;
-      }
-
-      const { error } = await supabase.from('profiles').insert({
-        user_id: userId,
-        display_name: displayName.trim(),
-        age: parseInt(age, 10),
-        institution_type: institution,
-        school_name: schoolName.trim() || null,
-        avatar_url: uploadedAvatarUrl,
-      });
-      
-      if (error) throw error;
-      onDone();
-    } catch (err: any) {
-      setError(err.message || 'Failed to save profile.');
-    } finally {
-      setLoading(false);
+      const { data } = supabase.storage.from('avatars').getPublicUrl(filePath);
+      uploadedAvatarUrl = data?.publicUrl || null;
     }
-  };
 
+    const { error } = await supabase.from('profiles').insert({
+      user_id: userId,
+      display_name: displayName.trim(),
+      age: parseInt(age, 10),
+      institution_type: institution,
+      school_name: schoolName.trim() || null,
+      avatar_url: uploadedAvatarUrl,
+    });
+    
+    if (error) throw error;
+    onDone();
+  } catch (err: any) {
+    setError(err.message || 'Failed to save profile.');
+  } finally {
+    setLoading(false);
+  }
+};
   return (
     <div className="relative flex min-h-screen items-center justify-center bg-bg px-4 py-10">
       <button
