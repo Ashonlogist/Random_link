@@ -168,7 +168,7 @@ function ChatApp({
 
   // Listen for direct friend calls (Completely isolated from pool matching updates)
   useEffect(() => {
-    const channel = supabase.channel('direct_calls_' + myId)
+    const channel = supabase.channel(`direct_calls_${myId}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'connections', filter: `responder_id=eq.${myId}` }, async (payload) => {
         const incomingCall = payload.new as SecureConnectionRow;
         
@@ -660,7 +660,8 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
     const { data, error } = await supabase
       .from('friendships')
       .select('*')
-      .eq('status', 'accepted');
+      .eq('status', 'accepted')
+      .or(`user_id.eq.${myId},friend_id.eq.${myId}`); // FIX: Filter strictly by active session ID
 
     if (!error && data) {
       const ids = data.map(f => f.user_id === myId ? f.friend_id : f.user_id);
@@ -741,32 +742,6 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
     </>
   );
 }
-
-function Searching({ mode, onCancel }: { mode: ChatMode; onCancel: () => void }) {
-  return (
-    <div className="flex flex-col items-center text-center">
-      <div className="relative flex h-24 w-24 items-center justify-center">
-        <div className="absolute inset-0 animate-ping rounded-full bg-accent/20" />
-        <div className="absolute inset-2 animate-pulse rounded-full bg-accent/30" />
-        <div className="relative flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-accent to-accent-2 text-white">
-          {mode === 'video' ? <Video className="h-7 w-7" /> : <MessageSquare className="h-7 w-7" />}
-        </div>
-      </div>
-      <h2 className="mt-6 text-2xl font-semibold">Looking…</h2>
-      <p className="mt-2 text-sm text-ink-muted">Finding someone for you.</p>
-
-      <LiveChatStats />
-
-      <button
-        onClick={onCancel}
-        className="mt-8 inline-flex items-center gap-2 rounded-xl border border-line bg-bg-elev px-5 py-2.5 text-sm font-medium text-ink-muted transition hover:text-ink"
-      >
-        <X className="h-4 w-4" /> Cancel
-      </button>
-    </div>
-  );
-}
-
 
 function ChatRoom({
   conn,
@@ -1062,11 +1037,13 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Secure
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `connection_id=eq.${conn.id}` }, (payload) => {
         const newMsg = payload.new as MessageRow;
         
-        // Block processing if the message is already present optimistically
         setMessages((prev) => {
+          // FIX: Correct identification to verify if our optimistic temp id or body parameters match
           if (prev.some((m) => m.id === newMsg.id || (m.body === newMsg.body && m.sender_id === newMsg.sender_id && m.id.startsWith('temp-')))) {
-            return prev;
+            // Replace the matching temporary message with the real server response to preserve the confirmed id
+            return prev.map((m) => (m.body === newMsg.body && m.sender_id === newMsg.sender_id && m.id.startsWith('temp-')) ? newMsg : m);
           }
+          
           if (String(newMsg.sender_id) !== String(myId) && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
             navigator.serviceWorker.ready.then((reg) => {
               reg.showNotification(partnerProfile?.display_name || "New Message", {
@@ -1115,21 +1092,19 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Secure
     };
 
     setMessages((prev) => [...prev, optimisticMessage]);
+    setReplyTarget(null);
 
     const payload: any = { connection_id: conn.id, sender_id: myId, body };
     if (replyTarget) payload.reply_to_id = replyTarget.id;
 
-    const { data, error } = await supabase.from('messages').insert(payload).select().single();
-    
+    // FIX: Remove syncMessages() loop execution block to ensure local state remains clean and intact
+    const { data, error } = await supabase.from('messages').insert(payload).select().maybeSingle();
     setSending(false);
-    setReplyTarget(null);
 
     if (!error && data) {
       setMessages((prev) =>
         prev.map((msg) => (msg.id === temporaryId ? { ...data, reply_body: optimisticMessage.reply_body } : msg))
       );
-    } else {
-      syncMessages();
     }
   };
 
@@ -1197,7 +1172,7 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Secure
         {replyTarget && <div className="mb-2 flex items-center justify-between p-2 rounded-xl bg-bg border border-line text-xs"><div className="truncate"><span className="font-semibold text-accent block">Replying to:</span><span className="text-ink-muted truncate block max-w-md">{replyTarget.body}</span></div><button onClick={() => setReplyTarget(null)} className="text-ink-faint hover:text-ink p-1"><X className="h-4 w-4" /></button></div>}
         <div className="flex items-center gap-2">
           <input type="file" ref={fileInputRef} onChange={handleAttachmentPick} className="hidden" />
-          <button onClick={() => fileInputRef.current?.click()} className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border bg-bg text-ink-muted hover:text-ink transition">{uploading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Paperclip className="h-5 w-5" />}</button>
+          <button onClick={fileInputRef.current?.click} className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border bg-bg text-ink-muted hover:text-ink transition">{uploading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Paperclip className="h-5 w-5" />}</button>
           <input value={input} onChange={(e) => handleInputChange(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} placeholder="Type a message…" className="flex-1 min-w-0 rounded-xl border bg-bg px-4 py-3 text-sm focus:outline-none" />
           <button onClick={() => send()} disabled={!input.trim()} className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent text-white transition disabled:opacity-40"><Send className="h-5 w-5" /></button>
         </div>
