@@ -651,6 +651,7 @@ function Lobby({ onStart, profile }: { onStart: (mode: ChatMode) => void; profil
   );
 }
 
+// FIX: Added the Unfriend handler to clean rows from friendships layout
 function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolean; onClose: () => void; myId: string; onDirectCall: (id: string, mode: ChatMode) => void }) {
   const [friends, setFriends] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -849,6 +850,97 @@ function ChatRoom({
   );
 }
 
+function VideoRoom({
+  conn,
+  myId,
+  localStream,
+  remoteStream,
+  localVideoRef,
+  remoteVideoRef,
+  camOn,
+  micOn,
+  onToggleCam,
+  onToggleMic,
+  onNext,
+  onStop,
+  partnerProfile,
+}: {
+  conn: SecureConnectionRow;
+  myId: string;
+  localStream: MediaStream | null;
+  remoteStream: MediaStream | null;
+  localVideoRef: React.RefObject<HTMLVideoElement>;
+  remoteVideoRef: React.RefObject<HTMLVideoElement>;
+  camOn: boolean;
+  micOn: boolean;
+  onToggleCam: () => void;
+  onToggleMic: () => void;
+  onNext: () => void;
+  onStop: () => void;
+  partnerProfile: any;
+}) {
+  const hasRemote = !!remoteStream && remoteStream.getTracks().length > 0;
+  const touchStartX = useRef(0);
+  const touchEndX = useRef(0);
+
+  useEffect(() => {
+    if (localVideoRef.current && localStream) localVideoRef.current.srcObject = localStream;
+  }, [localStream, localVideoRef]);
+
+  useEffect(() => {
+    if (remoteVideoRef.current && remoteStream) remoteVideoRef.current.srcObject = remoteStream;
+  }, [remoteStream, remoteVideoRef]);
+
+  return (
+    <div 
+      className="flex flex-col gap-3 w-full h-full absolute inset-0 sm:relative sm:h-auto bg-black sm:bg-transparent"
+      onTouchStart={(e) => { touchStartX.current = e.targetTouches[0].clientX; }}
+      onTouchMove={(e) => { touchEndX.current = e.targetTouches[0].clientX; }}
+      onTouchEnd={() => {
+        if (touchEndX.current - touchStartX.current > 150) onNext();
+        touchStartX.current = 0; touchEndX.current = 0;
+      }}
+    >
+      <div className="relative w-full h-full sm:h-auto sm:aspect-video overflow-hidden sm:rounded-2xl border-0 sm:border border-line bg-neutral-950 shadow-2xl flex-1 sm:flex-initial">
+        {hasRemote ? (
+          <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-cover sm:object-contain absolute inset-0" />
+        ) : (
+          <div className="flex h-full w-full flex-col items-center justify-center text-slate-400 absolute inset-0">
+            <Loader2 className="h-8 w-8 animate-spin text-accent" />
+            <p className="mt-3 text-sm">Waiting for remote feed…</p>
+          </div>
+        )}
+
+        <div className="absolute top-4 left-4 right-4 z-20 flex items-center justify-between bg-black/40 backdrop-blur-md px-3 py-2 rounded-2xl border border-white/10 sm:bg-bg-elev/80 sm:border-line">
+          <div className="flex items-center gap-2">
+            {partnerProfile?.avatar_url ? (
+              <img src={partnerProfile.avatar_url} alt="" className="h-9 w-9 rounded-full object-cover border border-accent" />
+            ) : (
+              <div className="h-9 w-9 rounded-full bg-accent/20 text-accent flex items-center justify-center border border-accent">
+                <User className="h-4 w-4" />
+              </div>
+            )}
+            <span className="text-sm font-semibold text-white sm:text-ink max-w-[100px] truncate">{partnerProfile?.display_name || 'Stranger'}</span>
+          </div>
+          <FriendActionButton myId={myId} partnerId={conn.initiator_id === myId ? conn.responder_id : conn.initiator_id} />
+        </div>
+
+        <div className="absolute right-4 bottom-24 z-20 h-28 w-20 sm:h-32 sm:w-44 overflow-hidden rounded-xl border border-white/20 bg-slate-800 shadow-xl sm:bottom-3 sm:right-3">
+          <video ref={localVideoRef} autoPlay playsInline muted className="h-full w-full object-cover" />
+          <span className="absolute bottom-1 left-1 rounded bg-black/50 px-1.5 py-0.5 text-[10px] text-white">You</span>
+        </div>
+      </div>
+
+      <div className="absolute bottom-6 left-0 right-0 z-20 flex items-center justify-center gap-3 pt-1 px-4 sm:relative sm:bottom-0 sm:bg-transparent sm:px-0">
+        <button onClick={onStop} className="inline-flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-black/40 backdrop-blur-md text-white sm:hidden"><ArrowLeft className="h-5 w-5" /></button>
+        <ControlButton onClick={onToggleCam} active={camOn} label="Cam"><Camera className="h-5 w-5" /></ControlButton>
+        <ControlButton onClick={onToggleMic} active={micOn} label={micOn ? 'Mute' : 'Unmute'}><MicIcon safeOn={micOn} /></ControlButton>
+        <button onClick={onNext} className="inline-flex h-14 items-center gap-2 rounded-2xl bg-gradient-to-r from-accent to-accent-2 px-7 text-sm font-semibold text-white shadow-lg"><Shuffle className="h-5 w-5" /> Next</button>
+      </div>
+    </div>
+  );
+}
+
 function FriendActionButton({ myId, partnerId }: { myId: string; partnerId: string }) {
   const [fStatus, setFStatus] = useState<'none' | 'pending_sent' | 'pending_received' | 'accepted'>('none');
 
@@ -916,7 +1008,7 @@ const isImageUrl = (url: string) => {
   return url.match(/\.(jpeg|jpg|gif|png|webp|svg)/i) != null || url.includes('storage.googleapis.com') || url.includes('supabase.co');
 };
 
-  function MicIcon({ safeOn }: { safeOn: boolean }) {
+function MicIcon({ safeOn }: { safeOn: boolean }) {
   return safeOn ? (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="h-5 w-5">
       <rect x="9" y="2" width="6" height="12" rx="3" />
@@ -1270,12 +1362,6 @@ function LiveChatStats() {
       </div>
     </div>
   );
-}
-
-function formatTime(s: number) {
-  const m = Math.floor(s / 60);
-  const sec = s % 60;
-  return `${m}:${sec.toString().padStart(2, '0')}`;
 }
 
 function Footer() {
