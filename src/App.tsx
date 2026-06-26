@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Video, MessageSquare, Shuffle, X, Send, Loader2, Camera, ArrowLeft, Sparkles, LogOut, Sun, Moon, Menu, Paperclip, Download, User, Edit, UserPlus, Check, CornerUpLeft, PhoneCall, PhoneOff } from 'lucide-react';
+import { Video, MessageSquare, Shuffle, X, Send, Loader2, Camera, ArrowLeft, Sparkles, LogOut, Sun, Moon, Menu, Paperclip, Download, User, Edit, UserPlus, Check, CornerUpLeft, PhoneCall, PhoneOff, UserMinus } from 'lucide-react';
 import { supabase, type ChatMode, type ConnectionRow, type MessageRow, type Profile } from './lib/supabase';
 import { PeerConnection } from './lib/webrtc';
 import {
@@ -23,7 +23,6 @@ type ExtendedMessageRow = MessageRow & {
   reply_body?: string | null;
 };
 
-// Extend local Connection types to include our new explicit metadata column
 type SecureConnectionRow = ConnectionRow & {
   is_direct?: boolean;
 };
@@ -173,7 +172,6 @@ function ChatApp({
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'connections', filter: `responder_id=eq.${myId}` }, async (payload) => {
         const incomingCall = payload.new as SecureConnectionRow;
         
-        // FIX 1: If it's a random room match, ignore it completely here!
         if (!incomingCall.is_direct) return;
 
         if (incomingCall.status === 'pending') {
@@ -404,7 +402,7 @@ function ChatApp({
         .from('connections')
         .select('*')
         .eq('mode', 'text')
-        .eq('is_direct', true) // Only reuse explicitly targeted direct lines
+        .eq('is_direct', true)
         .or(`and(initiator_id.eq.${myId},responder_id.eq.${friendId}),and(initiator_id.eq.${friendId},responder_id.eq.${myId})`)
         .order('created_at', { ascending: false })
         .limit(1)
@@ -419,7 +417,6 @@ function ChatApp({
       }
     }
 
-    // FIX 2: Set is_direct to true explicitly when initiating direct calls
     const { data: directConn, error: cErr } = await supabase
       .from('connections')
       .insert({
@@ -654,30 +651,32 @@ function Lobby({ onStart, profile }: { onStart: (mode: ChatMode) => void; profil
   );
 }
 
+// FIX: Added the Unfriend handler to clean rows from friendships layout
 function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolean; onClose: () => void; myId: string; onDirectCall: (id: string, mode: ChatMode) => void }) {
   const [friends, setFriends] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
+  const fetchFriends = useCallback(async () => {
+    setLoading(true);
+    const { data, error } = await supabase
+      .from('friendships')
+      .select('*')
+      .eq('status', 'accepted');
+
+    if (!error && data) {
+      const ids = data.map(f => f.user_id === myId ? f.friend_id : f.user_id);
+      if (ids.length > 0) {
+        const { data: profiles } = await supabase.from('profiles').select('*').in('user_id', ids);
+        if (profiles) setFriends(profiles);
+      } else {
+        setFriends([]);
+      }
+    }
+    setLoading(false);
+  }, [myId]);
+
   useEffect(() => {
     if (!isOpen) return;
-    const fetchFriends = async () => {
-      setLoading(true);
-      const { data, error } = await supabase
-        .from('friendships')
-        .select('*')
-        .eq('status', 'accepted');
-
-      if (!error && data) {
-        const ids = data.map(f => f.user_id === myId ? f.friend_id : f.user_id);
-        if (ids.length > 0) {
-          const { data: profiles } = await supabase.from('profiles').select('*').in('user_id', ids);
-          if (profiles) setFriends(profiles);
-        } else {
-          setFriends([]);
-        }
-      }
-      setLoading(false);
-    };
     fetchFriends();
 
     const channel = supabase.channel('friendships_drawer')
@@ -685,7 +684,16 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
-  }, [myId, isOpen]);
+  }, [isOpen, fetchFriends]);
+
+  const handleUnfriend = async (friendId: string) => {
+    if (!window.confirm("Are you sure you want to unfriend this user?")) return;
+    await supabase
+      .from('friendships')
+      .delete()
+      .or(`and(user_id.eq.${myId},friend_id.eq.${friendId}),and(user_id.eq.${friendId},friend_id.eq.${myId})`);
+    fetchFriends();
+  };
 
   return (
     <>
@@ -718,6 +726,7 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
                 <div className="flex gap-1.5">
                   <button onClick={() => onDirectCall(f.user_id, 'text')} className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 transition" title="Text Chat"><MessageSquare className="h-4 w-4" /></button>
                   <button onClick={() => onDirectCall(f.user_id, 'video')} className="p-2.5 rounded-xl bg-sky-500/10 text-sky-500 hover:bg-sky-500/20 transition" title="Video Call"><Video className="h-4 w-4" /></button>
+                  <button onClick={() => handleUnfriend(f.user_id)} className="p-2.5 rounded-xl bg-rose-500/10 text-rose-500 hover:bg-rose-500/20 transition" title="Unfriend"><UserMinus className="h-4 w-4" /></button>
                 </div>
               </div>
             ))
@@ -1352,5 +1361,13 @@ function LiveChatStats() {
         <div className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
       </div>
     </div>
+  );
+}
+
+function Footer() {
+  return (
+    <footer className="w-full border-t border-line px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] text-center text-xs text-ink-faint">
+      Be respectful. Use Next to skip anyone.
+    </footer>
   );
 }
