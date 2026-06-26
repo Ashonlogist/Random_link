@@ -479,20 +479,6 @@ function ChatApp({
     setError(null);
   }, [myId, teardownPeer, stopLocalStream]);
 
-  const toggleCam = useCallback(() => {
-    if (!localStream) return;
-    const newCam = !camOn;
-    localStream.getVideoTracks().forEach((t) => (t.enabled = newCam));
-    setCamOn(newCam);
-  }, [localStream, camOn]);
-
-  const toggleMic = useCallback(() => {
-    if (!localStream) return;
-    const newMic = !micOn;
-    localStream.getAudioTracks().forEach((t) => (t.enabled = newMic));
-    setMicOn(newMic);
-  }, [localStream, micOn]);
-
   return (
     <div className="flex min-h-screen flex-col bg-bg text-ink overflow-x-hidden relative">
       {phase !== 'connected' && (
@@ -651,7 +637,6 @@ function Lobby({ onStart, profile }: { onStart: (mode: ChatMode) => void; profil
   );
 }
 
-// FIX: Added the Unfriend handler to clean rows from friendships layout
 function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolean; onClose: () => void; myId: string; onDirectCall: (id: string, mode: ChatMode) => void }) {
   const [friends, setFriends] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -691,7 +676,7 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
     await supabase
       .from('friendships')
       .delete()
-      .or(`and(user_id.eq.${myId},friend_id.eq.${friendId}),and(user_id.eq.${friendId},friend_id.eq.${myId})`);
+      .or(`and(user_id.eq.${myId},friend_id.eq.${friendId}),and(user_id.eq.${friendId},friend_id.eq.${friendId})`);
     fetchFriends();
   };
 
@@ -1362,6 +1347,12 @@ function LiveChatStats() {
       </div>
     </div>
   );
+}
+
+function formatTime(s: number) {
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${m}:${sec.toString().padStart(2, '0')}`;
 }
 
 function Footer() {
