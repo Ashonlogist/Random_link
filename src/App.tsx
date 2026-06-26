@@ -522,8 +522,8 @@ function ChatApp({
             remoteVideoRef={remoteVideoRef}
             camOn={camOn}
             micOn={micOn}
-            onToggleCam={toggleCam}
-            onToggleMic={toggleMic}
+            onToggleCam={ontoggleCam}
+            onToggleMic={ontoggleMic}
             onNext={handleNext}
             onStop={handleStop}
             connectedAt={connectedAt}
