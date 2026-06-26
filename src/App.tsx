@@ -244,7 +244,7 @@ function ChatApp({
           setMenuOpen={setMenuOpen}
           onSignOut={onSignOut}
           theme={theme}
-          onToggleTheme={onToggleTheme} // FIXED: Passed the correct variable name
+          onToggleTheme={onToggleTheme}
           onOpenProfile={onOpenProfile}
         />
       )}
@@ -375,6 +375,9 @@ function Lobby({ onStart, profile }: { onStart: (mode: ChatMode) => void; profil
         Get paired with someone new. Choose how you want to connect.
       </p>
 
+      {/* STATS ADDED HERE FOR LOBBY */}
+      <LiveChatStats />
+
       <div className="mt-8 grid w-full grid-cols-1 gap-4 sm:grid-cols-2">
         <button
           onClick={() => onStart('video')}
@@ -414,6 +417,10 @@ function Searching({ mode, onCancel }: { mode: ChatMode; onCancel: () => void })
       </div>
       <h2 className="mt-6 text-2xl font-semibold">Looking…</h2>
       <p className="mt-2 text-sm text-ink-muted">Finding someone for you.</p>
+
+      {/* STATS ADDED HERE FOR SEARCHING */}
+      <LiveChatStats currentMode={mode} />
+
       <button
         onClick={onCancel}
         className="mt-8 inline-flex items-center gap-2 rounded-xl border border-line bg-bg-elev px-5 py-2.5 text-sm font-medium text-ink-muted transition hover:text-ink"
@@ -953,4 +960,70 @@ function formatTime(s: number) {
   const m = Math.floor(s / 60);
   const sec = s % 60;
   return `${m}:${sec.toString().padStart(2, '0')}`;
+}
+
+// --- NEW LIVE CHAT STATS COMPONENT ADDED BELOW ---
+
+function LiveChatStats({ currentMode }: { currentMode?: ChatMode }) {
+  const [stats, setStats] = useState({
+    video: { online: 0, chatting: 0 },
+    text: { online: 0, chatting: 0 }
+  });
+
+  useEffect(() => {
+    let active = true;
+    const fetchStats = async () => {
+      const [{ data: waiting }, { data: activeConns }] = await Promise.all([
+        supabase.from('waiting_room').select('mode'),
+        supabase.from('connections').select('mode').eq('status', 'connected')
+      ]);
+
+      if (!active) return;
+      const newStats = { video: { online: 0, chatting: 0 }, text: { online: 0, chatting: 0 } };
+
+      waiting?.forEach(r => { if (r.mode === 'video' || r.mode === 'text') newStats[r.mode].online++; });
+      activeConns?.forEach(r => {
+        if (r.mode === 'video' || r.mode === 'text') {
+          newStats[r.mode].chatting += 2;
+          newStats[r.mode].online += 2;
+        }
+      });
+      setStats(newStats);
+    };
+
+    fetchStats();
+    
+    // Subscribe to real-time changes
+    const channel = supabase.channel('stats_channel')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'waiting_room' }, fetchStats)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'connections' }, fetchStats)
+      .subscribe();
+
+    return () => {
+      active = false;
+      supabase.removeChannel(channel);
+    };
+  }, []);
+
+  const renderStat = (mode: 'video' | 'text', label: string, Icon: any) => (
+    <div className="flex items-center justify-between rounded-xl border border-line bg-bg-elev p-3 shadow-sm w-full max-w-xs mx-auto mb-2 mt-4">
+      <div className="flex items-center gap-3">
+        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-accent/10 text-accent">
+          <Icon className="h-4 w-4" />
+        </div>
+        <div className="flex flex-col text-left">
+          <span className="text-[10px] font-bold text-ink uppercase tracking-wider">{label}</span>
+          <span className="text-[10px] text-ink-muted">{stats[mode].online} Online • <span className="text-accent font-semibold">{stats[mode].chatting} Chatting</span></span>
+        </div>
+      </div>
+      <div className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+    </div>
+  );
+
+  return (
+    <div className="w-full flex flex-col items-center">
+      {(!currentMode || currentMode === 'video') && renderStat('video', 'Video Network', Video)}
+      {(!currentMode || currentMode === 'text') && renderStat('text', 'Text Network', MessageSquare)}
+    </div>
+  );
 }
