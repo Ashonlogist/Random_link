@@ -29,12 +29,6 @@ export default function App() {
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [friendsDrawerOpen, setFriendsDrawerOpen] = useState(false);
 
-  useEffect(() => {
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
-  }, []);
-
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center bg-bg">
@@ -170,6 +164,11 @@ function ChatApp({
       setRemoteStream(null);
       setConnectedAt(null);
 
+      // Safe Request Permission inside user interaction event handler
+      if ('Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission().catch(() => {});
+      }
+
       let stream: MediaStream | null = null;
       if (selectedMode === 'video') {
         try {
@@ -239,6 +238,11 @@ function ChatApp({
     setConnectedAt(null);
     setFriendsDrawerOpen(false);
 
+    // Safe request permission here too
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {});
+    }
+
     let stream: MediaStream | null = null;
     if (directMode === 'video') {
       try {
@@ -254,7 +258,6 @@ function ChatApp({
       }
     }
 
-    // Direct Message History Check: Look for an existing text chat connection
     if (directMode === 'text') {
       const { data: existing } = await supabase
         .from('connections')
@@ -266,7 +269,6 @@ function ChatApp({
         .maybeSingle();
 
       if (existing) {
-        // Reuse historical connection frame rather than re-instantiating an empty clean room
         setConn(existing);
         setPhase('connected');
         setConnectedAt(Date.now());
@@ -364,7 +366,6 @@ function ChatApp({
         )}
       </main>
 
-      {/* Full-Screen Sliding Sidebar DM Layout replacement */}
       <FriendsDrawer isOpen={friendsDrawerOpen} onClose={() => setFriendsDrawerOpen(false)} myId={myId} onDirectCall={startDirectCall} />
 
       {phase !== 'connected' && <Footer />}
@@ -404,7 +405,6 @@ function Header({
             )}
           </button>
 
-          {/* Three Dashes Hamburger replacing the old MoreVertical three dots */}
           <button
             onClick={onToggleDrawer}
             className="flex h-9 w-9 items-center justify-center rounded-xl border border-line bg-bg-elev text-ink-muted transition hover:text-ink"
@@ -457,7 +457,6 @@ function Lobby({ onStart, profile }: { onStart: (mode: ChatMode) => void; profil
   );
 }
 
-// Sidebar Drawer component that replaces the cluttered list under the lobby text boxes
 function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolean; onClose: () => void; myId: string; onDirectCall: (id: string, mode: ChatMode) => void }) {
   const [friends, setFriends] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -728,6 +727,7 @@ function VideoRoom({
 
       <div className="absolute bottom-6 left-0 right-0 z-20 flex items-center justify-center gap-3 pt-1 px-4 sm:relative sm:bottom-0 sm:bg-transparent sm:px-0">
         <button onClick={onStop} className="inline-flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-black/40 backdrop-blur-md text-white sm:hidden"><ArrowLeft className="h-5 w-5" /></button>
+        {/* FIX: Use correct onToggleCam instead of typoed toggleCam */}
         <ControlButton onClick={onToggleCam} active={camOn} label="Cam"><Camera className="h-5 w-5" /></ControlButton>
         <ControlButton onClick={onToggleMic} active={micOn} label={micOn ? 'Mute' : 'Unmute'}><MicIcon safeOn={micOn} /></ControlButton>
         <button onClick={onNext} className="inline-flex h-14 items-center gap-2 rounded-2xl bg-gradient-to-r from-accent to-accent-2 px-7 text-sm font-semibold text-white shadow-lg"><Shuffle className="h-5 w-5" /> Next</button>
@@ -1055,7 +1055,6 @@ function Footer() {
   );
 }
 
-// Clutterless Profile Modal containing theme switches, credentials, and logout handles
 function EditProfileModal({
   profile,
   email,
@@ -1132,7 +1131,9 @@ function EditProfileModal({
                 <User className="h-6 w-6 text-ink-faint" />
               )}
             </button>
-            <button onClick={() => fileRef.current?.click()} className="absolute bottom-0 right-0 p-1.5 rounded-full bg-accent text-white shadow-md"><Camera className="h-3 w-3"/></button>
+            <button onClick={() => fileRef.current?.click()} className="absolute bottom-0 right-0 p-1.5 rounded-full bg-accent text-white shadow-md">
+              {uploading ? <Loader2 className="h-3 w-3 animate-spin"/> : <Camera className="h-3 w-3"/>}
+            </button>
           </div>
           
           <div className="text-center w-full">
@@ -1188,7 +1189,6 @@ function LiveChatStats() {
     const fetchStats = async () => {
       const [{ data: waiting }, { data: activeConns }] = await Promise.all([
         supabase.from('waiting_room').select('mode'),
-        // Fix: Query updated_at alongside status to verify active interactions
         supabase.from('connections').select('mode, created_at, updated_at').eq('status', 'connected')
       ]);
 
@@ -1204,7 +1204,6 @@ function LiveChatStats() {
           newStats.video.chatting += 2;
           newStats.video.online += 2;
         } else if (r.mode === 'text') {
-          // If the last message exchange update occurred more than 5 minutes ago, they are no longer chatting
           const lastActive = new Date(r.updated_at || r.created_at).getTime();
           if (lastActive >= fiveMinutesAgo) {
             newStats.text.chatting += 2;
