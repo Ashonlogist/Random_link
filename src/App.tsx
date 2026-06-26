@@ -168,7 +168,7 @@ function ChatApp({
 
   // Listen for direct friend calls (Completely isolated from pool matching updates)
   useEffect(() => {
-    const channel = supabase.channel(`direct_calls_${myId}`)
+    const channel = supabase.channel('direct_calls_' + myId)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'connections', filter: `responder_id=eq.${myId}` }, async (payload) => {
         const incomingCall = payload.new as SecureConnectionRow;
         
@@ -679,22 +679,27 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
     fetchFriends();
 
     const channel = supabase.channel('friendships_drawer')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'friendships' }, fetchFriends)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'friendships' }, () => {
+        fetchFriends();
+      })
       .subscribe();
 
     return () => { supabase.removeChannel(channel); };
   }, [isOpen, fetchFriends]);
 
   const handleUnfriend = async (friendId: string) => {
-  if (!window.confirm("Are you sure you want to unfriend this user?")) return;
-  
-  await supabase
-    .from('friendships')
-    .delete()
-    .or(`and(user_id.eq.${myId},friend_id.eq.${friendId}),and(user_id.eq.${friendId},friend_id.eq.${myId})`);
+    if (!window.confirm("Are you sure you want to unfriend this user?")) return;
     
-  fetchFriends();
-};
+    const { error } = await supabase
+      .from('friendships')
+      .delete()
+      .or(`and(user_id.eq.${myId},friend_id.eq.${friendId}),and(user_id.eq.${friendId},friend_id.eq.${myId})`);
+      
+    if (!error) {
+      fetchFriends();
+    }
+  };
+
   return (
     <>
       {isOpen && <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-40 transition-opacity" onClick={onClose} />}
@@ -734,31 +739,6 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
         </div>
       </div>
     </>
-  );
-}
-
-function Searching({ mode, onCancel }: { mode: ChatMode; onCancel: () => void }) {
-  return (
-    <div className="flex flex-col items-center text-center">
-      <div className="relative flex h-24 w-24 items-center justify-center">
-        <div className="absolute inset-0 animate-ping rounded-full bg-accent/20" />
-        <div className="absolute inset-2 animate-pulse rounded-full bg-accent/30" />
-        <div className="relative flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-accent to-accent-2 text-white">
-          {mode === 'video' ? <Video className="h-7 w-7" /> : <MessageSquare className="h-7 w-7" />}
-        </div>
-      </div>
-      <h2 className="mt-6 text-2xl font-semibold">Looking…</h2>
-      <p className="mt-2 text-sm text-ink-muted">Finding someone for you.</p>
-
-      <LiveChatStats />
-
-      <button
-        onClick={onCancel}
-        className="mt-8 inline-flex items-center gap-2 rounded-xl border border-line bg-bg-elev px-5 py-2.5 text-sm font-medium text-ink-muted transition hover:text-ink"
-      >
-        <X className="h-4 w-4" /> Cancel
-      </button>
-    </div>
   );
 }
 
@@ -1055,19 +1035,26 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Secure
     const channel = supabase.channel(`realtime_msg_${conn.id}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages', filter: `connection_id=eq.${conn.id}` }, (payload) => {
         const newMsg = payload.new as MessageRow;
-        if (String(newMsg.sender_id) !== String(myId) && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
-          navigator.serviceWorker.ready.then((reg) => {
-            reg.showNotification(partnerProfile?.display_name || "New Message", {
-              body: newMsg.body.startsWith('http') ? "📷 Sent an image attachment" : newMsg.body,
-              icon: partnerProfile?.avatar_url || undefined,
-              tag: conn.id,
-              renotify: true,
-              data: { connectionId: conn.id, myId: myId },
-              actions: [{ action: 'reply', title: 'Reply', type: 'text', placeholder: 'Type response...' }]
+        
+        // Block processing if the message is already present optimistically
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === newMsg.id || (m.body === newMsg.body && m.sender_id === newMsg.sender_id && m.id.startsWith('temp-')))) {
+            return prev;
+          }
+          if (String(newMsg.sender_id) !== String(myId) && document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+            navigator.serviceWorker.ready.then((reg) => {
+              reg.showNotification(partnerProfile?.display_name || "New Message", {
+                body: newMsg.body.startsWith('http') ? "📷 Sent an image attachment" : newMsg.body,
+                icon: partnerProfile?.avatar_url || undefined,
+                tag: conn.id,
+                renotify: true,
+                data: { connectionId: conn.id, myId: myId },
+                actions: [{ action: 'reply', title: 'Reply', type: 'text', placeholder: 'Type response...' }]
+              });
             });
-          });
-        }
-        syncMessages();
+          }
+          return [...prev, newMsg];
+        });
       })
       .on('broadcast', { event: 'typing' }, (payload) => {
         if (String(payload.payload.senderId) !== String(myId)) {
@@ -1085,43 +1072,41 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Secure
   const handleInputChange = (val: string) => { setInput(val); supabase.channel(`realtime_msg_${conn.id}`).send({ type: 'broadcast', event: 'typing', payload: { senderId: myId } }); };
 
   const send = async (textBody?: string) => {
-  const body = (textBody ?? input).trim();
-  if (!body || sending) return;
-  if (!textBody) setInput('');
-  setSending(true);
+    const body = (textBody ?? input).trim();
+    if (!body || sending) return;
+    if (!textBody) setInput('');
+    setSending(true);
 
-  const temporaryId = `temp-${Date.now()}`;
-  const optimisticMessage: ExtendedMessageRow = {
-    id: temporaryId,
-    connection_id: conn.id,
-    sender_id: myId,
-    body,
-    created_at: new Date().toISOString(),
-    reply_to_id: replyTarget ? replyTarget.id : null,
-    reply_body: replyTarget ? replyTarget.body : null
+    const temporaryId = `temp-${Date.now()}`;
+    const optimisticMessage: ExtendedMessageRow = {
+      id: temporaryId,
+      connection_id: conn.id,
+      sender_id: myId,
+      body,
+      created_at: new Date().toISOString(),
+      reply_to_id: replyTarget ? replyTarget.id : null,
+      reply_body: replyTarget ? replyTarget.body : null
+    };
+
+    setMessages((prev) => [...prev, optimisticMessage]);
+
+    const payload: any = { connection_id: conn.id, sender_id: myId, body };
+    if (replyTarget) payload.reply_to_id = replyTarget.id;
+
+    const { data, error } = await supabase.from('messages').insert(payload).select().single();
+    
+    setSending(false);
+    setReplyTarget(null);
+
+    if (!error && data) {
+      setMessages((prev) =>
+        prev.map((msg) => (msg.id === temporaryId ? { ...data, reply_body: optimisticMessage.reply_body } : msg))
+      );
+    } else {
+      syncMessages();
+    }
   };
 
-  // Append locally instantly
-  setMessages((prev) => [...prev, optimisticMessage]);
-
-  const payload: any = { connection_id: conn.id, sender_id: myId, body };
-  if (replyTarget) payload.reply_to_id = replyTarget.id;
-
-  const { data, error } = await supabase.from('messages').insert(payload).select().single();
-  
-  setSending(true); // track active loop
-  setSending(false);
-  setReplyTarget(null);
-
-  if (!error && data) {
-    // Replace the temporary optimistic entry with the formal database row object
-    setMessages((prev) =>
-      prev.map((msg) => (msg.id === temporaryId ? { ...data, reply_body: optimisticMessage.reply_body } : msg))
-    );
-  } else {
-    syncMessages();
-  }
-};
   const handleAttachmentPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
       setUploading(true);
