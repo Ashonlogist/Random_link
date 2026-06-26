@@ -29,10 +29,11 @@ export default function App() {
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [friendsDrawerOpen, setFriendsDrawerOpen] = useState(false);
 
+  // Register background push Service Worker hooks
   useEffect(() => {
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js', { scope: '/' })
-        .then(() => console.log('[SW] Service worker active'))
+        .then(() => console.log('[SW] Background notification system active'))
         .catch(err => console.error('[SW Error] Registration failed:', err));
     }
   }, []);
@@ -136,7 +137,7 @@ function ChatApp({
     return () => { if (pruneTimerRef.current) clearInterval(pruneTimerRef.current); };
   }, []);
 
-  // Live background hook tracking arriving peer friendship request modifications
+  // Listen live to dynamic realtime updates on arriving friend requests
   useEffect(() => {
     const friendChannel = supabase.channel('live_friendships_requests')
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'friendships', filter: `friend_id=eq.${myId}` }, async (payload) => {
@@ -160,7 +161,7 @@ function ChatApp({
     return () => { supabase.removeChannel(friendChannel); };
   }, [myId]);
 
-  // Live direct background call routing handler to solve loading panel lockups
+  // Listen for direct phone/video call invitations from connected friends
   useEffect(() => {
     const channel = supabase.channel(`direct_calls_${myId}`)
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'connections', filter: `responder_id=eq.${myId}` }, async (payload) => {
@@ -202,7 +203,7 @@ function ChatApp({
         });
         setLocalStream(stream);
       } catch (err) {
-        console.error("Media feed tracking failure:", err);
+        console.error("Camera direct initialization exception:", err);
       }
     }
 
@@ -271,10 +272,6 @@ function ChatApp({
       setConn(null);
       setRemoteStream(null);
       setConnectedAt(null);
-
-      if ('Notification' in window && Notification.permission === 'default') {
-        Notification.requestPermission().catch(() => {});
-      }
 
       let stream: MediaStream | null = null;
       if (selectedMode === 'video') {
@@ -671,6 +668,7 @@ function Searching({ mode, onCancel }: { mode: ChatMode; onCancel: () => void })
     <div className="flex flex-col items-center text-center">
       <div className="relative flex h-24 w-24 items-center justify-center">
         <div className="absolute inset-0 animate-ping rounded-full bg-accent/20" />
+        <div className="absolute inset-2 animate-pulse rounded-full bg-accent/30" />
         <div className="relative flex h-16 w-16 items-center justify-center rounded-full bg-gradient-to-br from-accent to-accent-2 text-white">
           {mode === 'video' ? <Video className="h-7 w-7" /> : <MessageSquare className="h-7 w-7" />}
         </div>
@@ -861,7 +859,7 @@ function VideoRoom({
 
       <div className="absolute bottom-6 left-0 right-0 z-20 flex items-center justify-center gap-3 pt-1 px-4 sm:relative sm:bottom-0 sm:bg-transparent sm:px-0">
         <button onClick={onStop} className="inline-flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-black/40 backdrop-blur-md text-white sm:hidden"><ArrowLeft className="h-5 w-5" /></button>
-        {/* FIXED TYPO: Properly calling the destructured functions onToggleCam and onToggleMic */}
+        {/* FIXED: Mapped onClick events directly to onToggleCam and onToggleMic parameters from props wrapper context */}
         <ControlButton onClick={onToggleCam} active={camOn} label="Cam"><Camera className="h-5 w-5" /></ControlButton>
         <ControlButton onClick={onToggleMic} active={micOn} label={micOn ? 'Mute' : 'Unmute'}><MicIcon safeOn={micOn} /></ControlButton>
         <button onClick={onNext} className="inline-flex h-14 items-center gap-2 rounded-2xl bg-gradient-to-r from-accent to-accent-2 px-7 text-sm font-semibold text-white shadow-lg"><Shuffle className="h-5 w-5" /> Next</button>
@@ -933,7 +931,7 @@ function ControlButton({ onClick, active, label, children }: { onClick: () => vo
   );
 }
 
-// Full helper to cleanly determine image routing buckets inside text list arrays
+// Full canonical asset evaluation block helper
 const isImageUrl = (url: string) => {
   return url.match(/\.(jpeg|jpg|gif|png|webp|svg)/i) != null || url.includes('storage.googleapis.com') || url.includes('supabase.co');
 };
@@ -1043,41 +1041,23 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Connec
 
   return (
     <div className="flex h-screen sm:h-[68vh] flex-col overflow-hidden sm:rounded-2xl border border-line bg-bg w-full">
-      <div className="flex items-center justify-between p-4 border-b border-line bg-bg-elev shadow-sm">
+      <div className="flex items-center justify-between p-4 border-b border-line bg-bg-elev">
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold">{partnerProfile?.display_name || 'Stranger'}</span>
           <FriendActionButton myId={myId} partnerId={conn.initiator_id === myId ? conn.responder_id : conn.initiator_id} />
         </div>
         <button onClick={onStop} className="text-xs font-medium text-rose-500 bg-rose-500/10 px-3 py-1.5 rounded-xl">Leave</button>
       </div>
-
       <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto p-4 bg-bg-muted/30">
-        {messages.length === 0 && (
-          <div className="flex h-full flex-col items-center justify-center text-center text-ink-faint">
-            <MessageSquare className="h-8 w-8" />
-            <p className="mt-2 text-sm">Say hi to {partnerProfile?.display_name || 'Stranger'}!</p>
-          </div>
-        )}
         {messages.map((m) => {
           const mine = m.sender_id === myId;
           const isLink = m.body.startsWith('http');
           return (
             <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'} group`}>
               <div className="flex items-center gap-2 max-w-[78%]">
-                {!mine && (
-                  <button 
-                    onClick={() => setReplyTarget(m)} 
-                    className="opacity-0 group-hover:opacity-100 p-1.5 rounded-xl bg-bg border border-line text-ink-muted hover:text-ink transition order-last shadow-sm"
-                  >
-                    <CornerUpLeft className="h-3.5 w-3.5" />
-                  </button>
-                )}
-                <div className={`rounded-2xl px-4 py-2 text-sm shadow-sm ${mine ? 'bg-accent text-white shadow-md' : 'bg-bg border border-line text-ink'}`}>
-                  {m.reply_body && (
-                    <div className="mb-1.5 p-1.5 rounded-lg text-[11px] bg-black/5 text-ink-muted border-l-2 border-accent truncate max-w-[200px]">
-                      {m.reply_body}
-                    </div>
-                  )}
+                {!mine && <button onClick={() => setReplyTarget(m)} className="opacity-0 group-hover:opacity-100 p-1.5 rounded-xl bg-bg border border-line text-ink-muted hover:text-ink transition order-last shadow-sm"><CornerUpLeft className="h-3.5 w-3.5" /></button>}
+                <div className={`rounded-2xl px-4 py-2 text-sm shadow-sm ${mine ? 'bg-accent text-white shadow-md' : 'bg-bg border text-ink'}`}>
+                  {m.reply_body && <div className="mb-1.5 p-1.5 rounded-lg text-[11px] bg-black/5 text-ink-muted border-l-2 border-accent truncate max-w-[200px]">{m.reply_body}</div>}
                   {isLink ? (
                     isImageUrl(m.body) ? (
                       <div className="py-1">
@@ -1089,19 +1069,11 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Connec
                     )
                   ) : m.body}
                 </div>
-                {mine && (
-                  <button 
-                    onClick={() => setReplyTarget(m)} 
-                    className="opacity-0 group-hover:opacity-100 p-1.5 rounded-xl bg-bg border border-line text-ink-muted hover:text-ink transition shadow-sm"
-                  >
-                    <CornerUpLeft className="h-3.5 w-3.5" />
-                  </button>
-                )}
+                {mine && <button onClick={() => setReplyTarget(m)} className="opacity-0 group-hover:opacity-100 p-1.5 rounded-xl bg-bg border border-line text-ink-muted hover:text-ink transition shadow-sm"><CornerUpLeft className="h-3.5 w-3.5" /></button>}
               </div>
             </div>
           );
         })}
-
         {isTyping && (
           <div className="flex justify-start items-center gap-1.5 py-1">
             <span className="text-xs text-ink-muted">{partnerProfile?.display_name || 'Stranger'} is typing</span>
@@ -1113,34 +1085,12 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Connec
           </div>
         )}
       </div>
-
       <div className="border-t border-line p-3 bg-bg-elev shadow-inner">
-        {replyTarget && (
-          <div className="mb-2 flex items-center justify-between p-2 rounded-xl bg-bg border border-line text-xs">
-            <div className="truncate">
-              <span className="font-semibold text-accent block">Replying to:</span>
-              <span className="text-ink-muted truncate block max-w-md">{replyTarget.body}</span>
-            </div>
-            <button onClick={() => setReplyTarget(null)} className="text-ink-faint hover:text-ink p-1"><X className="h-4 w-4" /></button>
-          </div>
-        )}
+        {replyTarget && <div className="mb-2 flex items-center justify-between p-2 rounded-xl bg-bg border border-line text-xs"><div className="truncate"><span className="font-semibold text-accent block">Replying to:</span><span className="text-ink-muted truncate block max-w-md">{replyTarget.body}</span></div><button onClick={() => setReplyTarget(null)} className="text-ink-faint hover:text-ink p-1"><X className="h-4 w-4" /></button></div>}
         <div className="flex items-center gap-2">
           <input type="file" ref={fileInputRef} onChange={handleAttachmentPick} className="hidden" />
-          <button onClick={() => fileInputRef.current?.click()} className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border bg-bg text-ink-muted hover:text-ink transition">
-            {uploading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Paperclip className="h-5 w-5" />}
-          </button>
-          <input
-            value={input}
-            onChange={(e) => handleInputChange(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                send();
-              }
-            }}
-            placeholder="Type a message…"
-            className="flex-1 min-w-0 rounded-xl border bg-bg px-4 py-3 text-sm focus:outline-none"
-          />
+          <button onClick={() => fileInputRef.current?.click()} className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border bg-bg text-ink-muted hover:text-ink transition">{uploading ? <Loader2 className="h-5 w-5 animate-spin" /> : <Paperclip className="h-5 w-5" />}</button>
+          <input value={input} onChange={(e) => handleInputChange(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} placeholder="Type a message…" className="flex-1 min-w-0 rounded-xl border bg-bg px-4 py-3 text-sm focus:outline-none" />
           <button onClick={() => send()} disabled={!input.trim()} className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-accent text-white transition disabled:opacity-40"><Send className="h-5 w-5" /></button>
         </div>
         <button onClick={onNext} className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl border bg-bg py-2.5 text-sm font-medium text-ink-muted hover:text-ink transition"><Shuffle className="h-4 w-4" /> Next stranger</button>
