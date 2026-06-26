@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Video, MessageSquare, Shuffle, X, Send, Loader2, Camera, ArrowLeft, Sparkles, LogOut, Sun, Moon, MoreVertical, Paperclip, Download, User, Edit } from 'lucide-react';
+import { Video, MessageSquare, Shuffle, X, Send, Loader2, Camera, ArrowLeft, Sparkles, LogOut, Sun, Moon, MoreVertical, Paperclip, Download, User, Edit, UserPlus, Check, CornerUpLeft } from 'lucide-react';
 import { supabase, type ChatMode, type ConnectionRow, type MessageRow, type Profile } from './lib/supabase';
 import { PeerConnection } from './lib/webrtc';
 import {
@@ -18,10 +18,21 @@ import { Onboarding } from './components/Onboarding';
 type Phase = 'lobby' | 'searching' | 'connected';
 type ExtendedProfile = Profile & { avatar_url?: string | null };
 
+type ExtendedMessageRow = MessageRow & {
+  reply_to_id?: string | null;
+  reply_body?: string | null;
+};
+
 export default function App() {
   const { session, loading, refreshProfile, signOut } = useSession();
   const { theme, toggle } = useTheme();
   const [profileModalOpen, setProfileModalOpen] = useState(false);
+
+  useEffect(() => {
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+  }, []);
 
   if (loading) {
     return (
@@ -111,6 +122,15 @@ function ChatApp({
     return () => { if (pruneTimerRef.current) clearInterval(pruneTimerRef.current); };
   }, []);
 
+  const triggerMatchNotification = useCallback(() => {
+    if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+      new Notification("Match Found! 🎉", {
+        body: "We paired you up with a user. Open your chat tab now!",
+        icon: profile.avatar_url || undefined
+      });
+    }
+  }, [profile]);
+
   const stopLocalStream = useCallback(() => {
     localStream?.getTracks().forEach((t) => t.stop());
     setLocalStream(null);
@@ -158,6 +178,7 @@ function ChatApp({
       unsubIncomingRef.current?.();
       unsubIncomingRef.current = subscribeToIncomingMatches(myId, async (incoming) => {
         if (peerRef.current) return;
+        triggerMatchNotification();
         setConn(incoming);
         setPhase('connected');
         setConnectedAt(Date.now());
@@ -178,6 +199,7 @@ function ChatApp({
       try {
         const result = await findMatch(myId, selectedMode);
         if (result) {
+          triggerMatchNotification();
           setConn(result.conn);
           setPhase('connected');
           setConnectedAt(Date.now());
@@ -195,8 +217,61 @@ function ChatApp({
         setPhase('lobby');
       }
     },
-    [myId]
+    [myId, triggerMatchNotification]
   );
+
+  const startDirectCall = useCallback(async (friendId: string, directMode: ChatMode) => {
+    setError(null);
+    setMode(directMode);
+    setPhase('searching');
+    setConn(null);
+    setRemoteStream(null);
+    setConnectedAt(null);
+
+    let stream: MediaStream | null = null;
+    if (directMode === 'video') {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: { echoCancellation: true, noiseSuppression: true },
+        });
+        setLocalStream(stream);
+      } catch (err: any) {
+        setError('Media devices failed.');
+        setPhase('lobby');
+        return;
+      }
+    }
+
+    const { data: directConn, error: cErr } = await supabase
+      .from('connections')
+      .insert({
+        initiator_id: myId,
+        responder_id: friendId,
+        mode: directMode,
+        status: 'pending',
+      })
+      .select()
+      .single();
+
+    if (cErr) {
+      setError("Couldn't start call session.");
+      setPhase('lobby');
+      return;
+    }
+
+    setConn(directConn);
+    setPhase('connected');
+    setConnectedAt(Date.now());
+    const peer = new PeerConnection(directConn, myId, {
+      onRemoteStream: (s) => setRemoteStream(s),
+      onDisconnected: () => handleStop(),
+      onError: (e) => console.error(e),
+    });
+    peerRef.current = peer;
+    await peer.attachLocalStream(stream);
+    await peer.createOffer();
+  }, [myId]);
 
   const handleNext = useCallback(async () => {
     await teardownPeer();
@@ -254,7 +329,7 @@ function ChatApp({
             {error}
           </div>
         )}
-        {phase === 'lobby' && <Lobby onStart={startSearching} profile={profile} />}
+        {phase === 'lobby' && <Lobby onStart={startSearching} onDirectCall={startDirectCall} profile={profile} myId={myId} />}
         {phase === 'searching' && <Searching mode={mode} onCancel={handleStop} />}
         {phase === 'connected' && conn && (
           <ChatRoom
@@ -365,17 +440,16 @@ function Header({
   );
 }
 
-function Lobby({ onStart, profile }: { onStart: (mode: ChatMode) => void; profile: ExtendedProfile }) {
+function Lobby({ onStart, onDirectCall, profile, myId }: { onStart: (mode: ChatMode) => void; onDirectCall: (id: string, mode: ChatMode) => void; profile: ExtendedProfile; myId: string }) {
   return (
     <div className="flex w-full max-w-3xl flex-col items-center text-center">
       <h1 className="mt-2 bg-gradient-to-r from-accent to-accent-2 bg-clip-text text-4xl font-bold tracking-tight text-transparent sm:text-5xl">
         Hey, {profile.display_name}
       </h1>
       <p className="mt-3 max-w-md text-ink-muted">
-        Get paired with someone new. Choose how you want to connect.
+        Get paired with someone new or connect directly with friends.
       </p>
 
-      {/* STATS ADDED HERE FOR LOBBY */}
       <LiveChatStats />
 
       <div className="mt-8 grid w-full grid-cols-1 gap-4 sm:grid-cols-2">
@@ -401,6 +475,60 @@ function Lobby({ onStart, profile }: { onStart: (mode: ChatMode) => void; profil
           <p className="mt-1 text-sm text-ink-muted">Messaging, no camera needed</p>
         </button>
       </div>
+
+      <FriendsPanel myId={myId} onDirectCall={onDirectCall} />
+    </div>
+  );
+}
+
+function FriendsPanel({ myId, onDirectCall }: { myId: string; onDirectCall: (id: string, mode: ChatMode) => void }) {
+  const [friends, setFriends] = useState<any[]>([]);
+
+  useEffect(() => {
+    const fetchFriends = async () => {
+      const { data, error } = await supabase
+        .from('friendships')
+        .select(`
+          status,
+          user_id,
+          friend_id
+        `)
+        .eq('status', 'accepted');
+
+      if (!error && data) {
+        const ids = data.map(f => f.user_id === myId ? f.friend_id : f.user_id);
+        if (ids.length > 0) {
+          const { data: profiles } = await supabase.from('profiles').select('*').in('user_id', ids);
+          if (profiles) setFriends(profiles);
+        }
+      }
+    };
+    fetchFriends();
+  }, [myId]);
+
+  if (friends.length === 0) return null;
+
+  return (
+    <div className="mt-10 w-full text-left max-w-xl mx-auto border border-line bg-bg-elev p-4 rounded-2xl">
+      <h3 className="text-sm font-bold uppercase tracking-wider text-ink-muted mb-3">Your Friends</h3>
+      <div className="space-y-2">
+        {friends.map(f => (
+          <div key={f.user_id} className="flex items-center justify-between p-2 rounded-xl bg-bg border border-line">
+            <div className="flex items-center gap-2">
+              {f.avatar_url ? (
+                <img src={f.avatar_url} alt="" className="h-8 w-8 rounded-full object-cover" />
+              ) : (
+                <div className="h-8 w-8 rounded-full bg-accent/20 flex items-center justify-center"><User className="h-4 w-4 text-accent" /></div>
+              )}
+              <span className="text-sm font-medium">{f.display_name}</span>
+            </div>
+            <div className="flex gap-1">
+              <button onClick={() => onDirectCall(f.user_id, 'text')} className="p-2 rounded-lg bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20"><MessageSquare className="h-4 w-4" /></button>
+              <button onClick={() => onDirectCall(f.user_id, 'video')} className="p-2 rounded-lg bg-sky-500/10 text-sky-500 hover:bg-sky-500/20"><Video className="h-4 w-4" /></button>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -418,7 +546,6 @@ function Searching({ mode, onCancel }: { mode: ChatMode; onCancel: () => void })
       <h2 className="mt-6 text-2xl font-semibold">Looking…</h2>
       <p className="mt-2 text-sm text-ink-muted">Finding someone for you.</p>
 
-      {/* STATS ADDED HERE FOR SEARCHING */}
       <LiveChatStats currentMode={mode} />
 
       <button
@@ -475,10 +602,6 @@ function ChatRoom({
       .maybeSingle()
       .then(({ data, error }) => {
         if (!error && data) setPartnerProfile(data);
-        else {
-          supabase.from('profiles').select('display_name').eq('user_id', partnerId).maybeSingle()
-            .then(({ data: d }) => { if (d) setPartnerProfile(d); });
-        }
       });
   }, [conn, myId]);
 
@@ -502,6 +625,8 @@ function ChatRoom({
 
       {mode === 'video' ? (
         <VideoRoom
+          conn={conn}
+          myId={myId}
           localStream={localStream}
           remoteStream={remoteStream}
           localVideoRef={localVideoRef}
@@ -522,6 +647,8 @@ function ChatRoom({
 }
 
 function VideoRoom({
+  conn,
+  myId,
   localStream,
   remoteStream,
   localVideoRef,
@@ -534,6 +661,8 @@ function VideoRoom({
   onStop,
   partnerProfile,
 }: {
+  conn: ConnectionRow;
+  myId: string;
   localStream: MediaStream | null;
   remoteStream: MediaStream | null;
   localVideoRef: React.RefObject<HTMLVideoElement>;
@@ -578,17 +707,18 @@ function VideoRoom({
           </div>
         )}
 
-        <div className="absolute top-4 left-4 z-20 flex items-center gap-3 bg-black/40 backdrop-blur-md px-3 py-2 rounded-2xl border border-white/10 sm:bg-bg-elev/80 sm:border-line">
-          {partnerProfile?.avatar_url ? (
-            <img src={partnerProfile.avatar_url} alt="Partner" className="h-9 w-9 rounded-full object-cover border border-accent" />
-          ) : (
-            <div className="h-9 w-9 rounded-full bg-accent/20 text-accent flex items-center justify-center border border-accent">
-              <User className="h-4 w-4" />
-            </div>
-          )}
-          <div className="flex flex-col">
+        <div className="absolute top-4 left-4 z-20 flex items-center justify-between bg-black/40 backdrop-blur-md px-3 py-2 rounded-2xl border border-white/10 sm:bg-bg-elev/80 sm:border-line">
+          <div className="flex items-center gap-3">
+            {partnerProfile?.avatar_url ? (
+              <img src={partnerProfile.avatar_url} alt="" className="h-9 w-9 rounded-full object-cover border border-accent" />
+            ) : (
+              <div className="h-9 w-9 rounded-full bg-accent/20 text-accent flex items-center justify-center border border-accent">
+                <User className="h-4 w-4" />
+              </div>
+            )}
             <span className="text-sm font-semibold text-white sm:text-ink">{partnerProfile?.display_name || 'Stranger'}</span>
           </div>
+          <FriendActionButton myId={myId} partnerId={conn.initiator_id === myId ? conn.responder_id : conn.initiator_id} />
         </div>
 
         <div className="absolute right-4 top-4 z-20 h-28 w-20 sm:h-32 sm:w-44 overflow-hidden rounded-xl border border-white/20 bg-slate-800 shadow-xl sm:bottom-3 sm:right-3 sm:top-auto">
@@ -607,26 +737,53 @@ function VideoRoom({
   );
 }
 
-function ControlButton({
-  onClick,
-  active,
-  label,
-  children,
-}: {
-  onClick: () => void;
-  active: boolean;
-  label: string;
-  children: any;
-}) {
+function FriendActionButton({ myId, partnerId }: { myId: string; partnerId: string }) {
+  const [fStatus, setFStatus] = useState<'none' | 'pending_sent' | 'pending_received' | 'accepted'>('none');
+
+  useEffect(() => {
+    const checkFriendship = async () => {
+      const { data } = await supabase
+        .from('friendships')
+        .select('*')
+        .or(`and(user_id.eq.${myId},friend_id.eq.${partnerId}),and(user_id.eq.${partnerId},friend_id.eq.${myId})`)
+        .maybeSingle();
+
+      if (data) {
+        if (data.status === 'accepted') setFStatus('accepted');
+        else if (data.user_id === myId) setFStatus('none');
+        else setFStatus('pending_received');
+      }
+    };
+    checkFriendship();
+  }, [myId, partnerId]);
+
+  const addFriend = async () => {
+    if (fStatus === 'none') {
+      await supabase.from('friendships').insert({ user_id: myId, friend_id: partnerId, status: 'pending' });
+      setFStatus('pending_sent');
+    } else if (fStatus === 'pending_received') {
+      await supabase.from('friendships').update({ status: 'accepted' }).eq('user_id', partnerId).eq('friend_id', myId);
+      setFStatus('accepted');
+    }
+  };
+
+  if (fStatus === 'accepted') return <span className="ml-3 text-emerald-400 text-xs font-semibold inline-flex items-center gap-1"><Check className="h-3 w-3"/> Friends</span>;
+  return (
+    <button onClick={addFriend} className="ml-4 inline-flex items-center gap-1 bg-accent hover:bg-accent-2 text-white text-xs px-2.5 py-1 rounded-xl transition">
+      <UserPlus className="h-3 w-3" />
+      {fStatus === 'pending_sent' ? 'Sent' : fStatus === 'pending_received' ? 'Accept Friend' : 'Add Friend'}
+    </button>
+  );
+}
+
+function ControlButton({ onClick, active, label, children }: { onClick: () => void; active: boolean; label: string; children: any }) {
   return (
     <button
       onClick={onClick}
       title={label}
       aria-label={label}
       className={`inline-flex h-14 w-14 items-center justify-center rounded-2xl border transition active:scale-95 ${
-        active
-          ? 'border-line bg-bg-elev text-ink'
-          : 'border-rose-500/40 bg-rose-500/10 text-rose-500 dark:text-rose-300'
+        active ? 'border-line bg-bg-elev text-ink' : 'border-rose-500/40 bg-rose-500/10 text-rose-500 dark:text-rose-300'
       }`}
     >
       {children}
@@ -665,11 +822,12 @@ function TextRoom({
   partnerProfile: any;
   onStop: () => void;
 }) {
-  const [messages, setMessages] = useState<MessageRow[]>([]);
+  const [messages, setMessages] = useState<ExtendedMessageRow[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
+  const [replyTarget, setReplyTarget] = useState<ExtendedMessageRow | null>(null);
   
   const scrollRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -685,44 +843,27 @@ function TextRoom({
         .eq('connection_id', conn.id)
         .order('created_at', { ascending: true })
         .then(({ data }) => {
-          if (active && data) setMessages(data as MessageRow[]);
+          if (active && data) {
+            const mapped: ExtendedMessageRow[] = (data as any[]).map(msg => {
+              if (msg.reply_to_id) {
+                const quoted = data.find(m => m.id === msg.reply_to_id);
+                return { ...msg, reply_body: quoted ? quoted.body : "Original message missing" };
+              }
+              return msg;
+            });
+            setMessages(mapped);
+          }
         });
     };
 
     fetchLatestMessages();
-
     const pollInterval = window.setInterval(fetchLatestMessages, 1500);
-
-    const channel = supabase
-      .channel(`chat-room-fallback-${conn.id}`)
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'messages' },
-        (payload) => {
-          if (!active) return;
-          const newMsg = payload.new as MessageRow;
-          if (String(newMsg.connection_id) === String(conn.id)) {
-            setMessages((prev) => prev.some((m) => m.id === newMsg.id) ? prev : [...prev, newMsg]);
-          }
-        }
-      )
-      .on('broadcast', { event: 'typing' }, (payload) => {
-        if (!active) return;
-        if (String(payload.payload.senderId) !== String(myId)) {
-          setIsTyping(true);
-          if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
-          typingTimeoutRef.current = window.setTimeout(() => setIsTyping(false), 2000);
-        }
-      })
-      .subscribe();
 
     return () => {
       active = false;
       clearInterval(pollInterval);
-      channel.unsubscribe();
-      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
     };
-  }, [conn.id, myId]);
+  }, [conn.id]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
@@ -743,15 +884,20 @@ function TextRoom({
     if (!textBody) setInput('');
     setSending(true);
 
-    const { error } = await supabase.from('messages').insert({
+    const payload: any = {
       connection_id: conn.id,
       sender_id: myId,
       body,
-    });
-    setSending(false);
-    if (error) {
-      if (!textBody) setInput(body);
+    };
+
+    if (replyTarget) {
+      payload.reply_to_id = replyTarget.id;
     }
+
+    const { error } = await supabase.from('messages').insert(payload);
+    setSending(false);
+    setReplyTarget(null);
+    if (error && !textBody) setInput(body);
   };
 
   const handleAttachmentPick = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -767,21 +913,20 @@ function TextRoom({
         if (data?.publicUrl) await send(data.publicUrl);
       } catch (err) {
         console.error(err);
-      } finally {
+      } finaly {
         setUploading(false);
         if (fileInputRef.current) fileInputRef.current.value = '';
       }
     }
   };
 
-  const isImageUrl = (url: string) => {
-    return url.match(/\.(jpeg|jpg|gif|png|webp|svg)/i) != null || url.includes('storage.googleapis.com') || url.includes('supabase.co');
-  };
-
   return (
     <div className="flex h-screen sm:h-[68vh] flex-col overflow-hidden sm:rounded-2xl border border-line bg-bg w-full">
-      <div className="flex sm:hidden items-center justify-between p-4 border-b border-line bg-bg-elev">
-        <span className="text-sm font-semibold">{partnerProfile?.display_name || 'Stranger'}</span>
+      <div className="flex items-center justify-between p-4 border-b border-line bg-bg-elev">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-semibold">{partnerProfile?.display_name || 'Stranger'}</span>
+          <FriendActionButton myId={myId} partnerId={conn.initiator_id === myId ? conn.responder_id : conn.initiator_id} />
+        </div>
         <button onClick={onStop} className="text-xs font-medium text-rose-500 bg-rose-500/10 px-3 py-1.5 rounded-xl">Leave</button>
       </div>
 
@@ -796,18 +941,42 @@ function TextRoom({
           const mine = m.sender_id === myId;
           const isLink = m.body.startsWith('http');
           return (
-            <div key={m.id} className={`flex ${mine ? 'justify-end' : 'justify-start'}`}>
-              <div className={`max-w-[78%] rounded-2xl px-4 py-2 text-sm ${mine ? 'bg-accent text-white shadow-md' : 'bg-bg-muted text-ink border border-line'}`}>
-                {isLink ? (
-                  isImageUrl(m.body) ? (
+            <div 
+              key={m.id} 
+              className={`flex ${mine ? 'justify-end' : 'justify-start'} group relative`}
+            >
+              <div className="flex items-center gap-2 max-w-[78%]">
+                {!mine && (
+                  <button 
+                    onClick={() => setReplyTarget(m)} 
+                    className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg bg-bg-muted border border-line text-ink-muted hover:text-ink transition order-last"
+                    title="Reply to message"
+                  >
+                    <CornerUpLeft className="h-3.5 w-3.5" />
+                  </button>
+                )}
+                <div className={`rounded-2xl px-4 py-2 text-sm relative ${mine ? 'bg-accent text-white shadow-md' : 'bg-bg-muted text-ink border border-line'}`}>
+                  {m.reply_body && (
+                    <div className="mb-1.5 p-1.5 rounded text-xs bg-black/10 text-ink-muted border-l-2 border-accent truncate max-w-xs">
+                      {m.reply_body}
+                    </div>
+                  )}
+                  {isLink ? (
                     <div className="py-1">
-                      <img src={m.body} alt="Attachment" className="rounded-lg max-h-48 object-contain bg-black/5" />
+                      <img src={m.body} alt="" className="rounded-lg max-h-48 object-contain bg-black/5" />
                       <a href={m.body} target="_blank" rel="noreferrer" className="block text-[11px] underline mt-1 text-center opacity-80">Open Full Size</a>
                     </div>
-                  ) : (
-                    <a href={m.body} target="_blank" rel="noreferrer" className="underline inline-flex items-center gap-1"><Download className="h-4 w-4" /> Download file</a>
-                  )
-                ) : m.body}
+                  ) : m.body}
+                </div>
+                {mine && (
+                  <button 
+                    onClick={() => setReplyTarget(m)} 
+                    className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg bg-bg-muted border border-line text-ink-muted hover:text-ink transition"
+                    title="Reply to message"
+                  >
+                    <CornerUpLeft className="h-3.5 w-3.5" />
+                  </button>
+                )}
               </div>
             </div>
           );
@@ -826,6 +995,15 @@ function TextRoom({
       </div>
 
       <div className="border-t border-line p-3 bg-bg-elev">
+        {replyTarget && (
+          <div className="mb-2 flex items-center justify-between p-2 rounded-xl bg-bg border border-line text-xs">
+            <div className="truncate">
+              <span className="font-semibold text-accent block">Replying to:</span>
+              <span className="text-ink-muted truncate block max-w-md">{replyTarget.body}</span>
+            </div>
+            <button onClick={() => setReplyTarget(null)} className="text-ink-faint hover:text-ink"><X className="h-4 w-4" /></button>
+          </div>
+        )}
         <div className="flex items-center gap-2">
           <input type="file" ref={fileInputRef} onChange={handleAttachmentPick} className="hidden" />
           <button onClick={() => fileInputRef.current?.click()} className="inline-flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border bg-bg text-ink-muted">
@@ -891,7 +1069,7 @@ function EditProfileModal({
       setUploading(true);
       const file = e.target.files[0];
       const ext = file.name.split('.').pop();
-      const path = `${profile.user_id}-${Date.now()}.${ext}`;
+      const path = `${profile.user_id}/${Date.now()}.${ext}`;
 
       const { error: uploadError } = await supabase.storage.from('avatars').upload(path, file, { upsert: true });
       if (!uploadError) {
@@ -962,8 +1140,6 @@ function formatTime(s: number) {
   return `${m}:${sec.toString().padStart(2, '0')}`;
 }
 
-// --- NEW LIVE CHAT STATS COMPONENT ADDED BELOW ---
-
 function LiveChatStats({ currentMode }: { currentMode?: ChatMode }) {
   const [stats, setStats] = useState({
     video: { online: 0, chatting: 0 },
@@ -993,7 +1169,6 @@ function LiveChatStats({ currentMode }: { currentMode?: ChatMode }) {
 
     fetchStats();
     
-    // Subscribe to real-time changes
     const channel = supabase.channel('stats_channel')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'waiting_room' }, fetchStats)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'connections' }, fetchStats)
