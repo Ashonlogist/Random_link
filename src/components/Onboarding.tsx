@@ -87,23 +87,25 @@ export function Onboarding({
     // ... rest of your code
 
     // 1. Try to upload the avatar, but don't let it block the profile creation
-    if (avatarFile) {
-      try {
-        const fileExt = avatarFile.name.split('.').pop();
-        const filePath = `${userId}-${Math.random()}.${fileExt}`;
-        const { error: uploadError } = await supabase.storage
-          .from('avatars')
-          .upload(filePath, avatarFile, { upsert: true });
+    // Inside src/components/Onboarding.tsx, in the finish function:
 
-        if (!uploadError) {
-          const { data } = supabase.storage.from('avatars').getPublicUrl(filePath);
-          uploadedAvatarUrl = data?.publicUrl || null;
-        }
-      } catch (e) {
-        console.warn('Avatar upload failed, but proceeding with profile creation:', e);
-      }
-    }
+if (avatarFile) {
+  const fileExt = avatarFile.name.split('.').pop();
+  const filePath = `${userId}-${Math.random()}.${fileExt}`;
 
+  // ADDED: Explicit contentType
+  const { error: uploadError } = await supabase.storage
+    .from('avatars')
+    .upload(filePath, avatarFile, { 
+      upsert: true,
+      contentType: avatarFile.type // This helps Supabase parse the file correctly
+    });
+
+  if (uploadError) throw uploadError;
+
+  const { data } = supabase.storage.from('avatars').getPublicUrl(filePath);
+  uploadedAvatarUrl = data?.publicUrl || null;
+}
     // 2. Always create the profile, regardless of whether the avatar uploaded
     try {
       const { error } = await supabase.from('profiles').insert({
