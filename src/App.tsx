@@ -29,12 +29,12 @@ export default function App() {
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [friendsDrawerOpen, setFriendsDrawerOpen] = useState(false);
 
-  // Register background push capabilities
+  // Register the background Service Worker for handling offline push logic
   useEffect(() => {
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/sw.js')
-        .then(() => console.log('[ServiceWorker] System operational.'))
-        .catch(err => console.error('[ServiceWorker] System registration failed:', err));
+        .then(() => console.log('[ServiceWorker] Active & Registered'))
+        .catch(err => console.error('[ServiceWorker] Registration failed:', err));
     }
   }, []);
 
@@ -135,33 +135,36 @@ function ChatApp({
     return () => { if (pruneTimerRef.current) clearInterval(pruneTimerRef.current); };
   }, []);
 
-  // Listen live to background friend invitations
+  // Listen live to dynamic realtime updates on arriving friend requests
   useEffect(() => {
-    const friendChannel = supabase.channel('live_friendships_requests')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'friendships', filter: `friend_id=eq.${myId}` }, async (payload) => {
-        if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
-          const { data: sender } = await supabase.from('profiles').select('display_name, avatar_url').eq('user_id', payload.new.user_id).maybeSingle();
-          
-          navigator.serviceWorker.ready.then((reg) => {
-            reg.showNotification("Friend Request Received 🤝", {
-              body: `${sender?.display_name || 'Someone'} wants to add you as a friend!`,
-              icon: sender?.avatar_url || undefined,
-              tag: payload.new.id,
-              data: { friendshipId: payload.new.id },
-              actions: [
-                { action: 'friend_accept', title: 'Accept Request' },
-                { action: 'friend_dismiss', title: 'Dismiss' }
-              ]
+    const channel = supabase.channel(`friendships_alerts_${myId}`)
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'friendships', filter: `friend_id=eq.${myId}` },
+        async (payload) => {
+          if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+            const { data: sender } = await supabase.from('profiles').select('display_name, avatar_url').eq('user_id', payload.new.user_id).maybeSingle();
+            
+            navigator.serviceWorker.ready.then((reg) => {
+              reg.showNotification("Friend Request Received 🤝", {
+                body: `${sender?.display_name || 'Someone'} wants to add you as a friend!`,
+                icon: sender?.avatar_url || undefined,
+                tag: payload.new.id,
+                data: { friendshipId: payload.new.id },
+                actions: [
+                  { action: 'friend_accept', title: 'Accept Request' },
+                  { action: 'friend_dismiss', title: 'Dismiss' }
+                ]
+              });
             });
-          });
+          }
         }
-      })
+      )
       .subscribe();
 
-    return () => { supabase.removeChannel(friendChannel); };
+    return () => { supabase.removeChannel(channel); };
   }, [myId]);
 
-  // Push notification logic for a successful queue match
   const pushMatchNotification = useCallback(async (incoming: ConnectionRow) => {
     if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
       const partnerId = incoming.initiator_id === myId ? incoming.responder_id : incoming.initiator_id;
@@ -212,7 +215,6 @@ function ChatApp({
       setRemoteStream(null);
       setConnectedAt(null);
 
-      // Secure runtime push authorizations safely during short user click windows
       if ('Notification' in window && Notification.permission === 'default') {
         Notification.requestPermission().catch(() => {});
       }
@@ -374,6 +376,20 @@ function ChatApp({
     setConnectedAt(null);
     setError(null);
   }, [myId, teardownPeer, stopLocalStream]);
+
+  const toggleCam = useCallback(() => {
+    if (!localStream) return;
+    const newCam = !camOn;
+    localStream.getVideoTracks().forEach((t) => (t.enabled = newCam));
+    setCamOn(newCam);
+  }, [localStream, camOn]);
+
+  const toggleMic = useCallback(() => {
+    if (!localStream) return;
+    const newMic = !micOn;
+    localStream.getAudioTracks().forEach((t) => (t.enabled = newMic));
+    setMicOn(newMic);
+  }, [localStream, micOn]);
 
   return (
     <div className="flex min-h-screen flex-col bg-bg text-ink overflow-x-hidden relative">
@@ -774,6 +790,7 @@ function VideoRoom({
 
       <div className="absolute bottom-6 left-0 right-0 z-20 flex items-center justify-center gap-3 pt-1 px-4 sm:relative sm:bottom-0 sm:bg-transparent sm:px-0">
         <button onClick={onStop} className="inline-flex h-14 w-14 items-center justify-center rounded-2xl border border-white/10 bg-black/40 backdrop-blur-md text-white sm:hidden"><ArrowLeft className="h-5 w-5" /></button>
+        {/* FIX APPLIED: Uses destructured context parameters properly */}
         <ControlButton onClick={onToggleCam} active={camOn} label="Cam"><Camera className="h-5 w-5" /></ControlButton>
         <ControlButton onClick={onToggleMic} active={micOn} label={micOn ? 'Mute' : 'Unmute'}><MicIcon safeOn={micOn} /></ControlButton>
         <button onClick={onNext} className="inline-flex h-14 items-center gap-2 rounded-2xl bg-gradient-to-r from-accent to-accent-2 px-7 text-sm font-semibold text-white shadow-lg"><Shuffle className="h-5 w-5" /> Next</button>
@@ -916,12 +933,13 @@ function TextRoom({
         (payload) => {
           const newMsg = payload.new as MessageRow;
           
+          // Background Push Notification Trigger with interactive action reply fields
           if (String(newMsg.sender_id) !== String(myId) && document.hidden) {
             if ('Notification' in window && Notification.permission === 'granted') {
               navigator.serviceWorker.ready.then((registration) => {
                 registration.showNotification(partnerProfile?.display_name || "New Message", {
                   body: newMsg.body.startsWith('http') ? "📷 Sent an image attachment" : newMsg.body,
-                  icon: partnerProfile?.avatar_url || undefined,
+                  icon: partnerProfile?.avatar_url || "/user-placeholder.png",
                   tag: conn.id,
                   renotify: true,
                   data: { connectionId: conn.id, myId: myId },
