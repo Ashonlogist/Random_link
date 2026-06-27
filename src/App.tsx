@@ -24,6 +24,32 @@ type ExtendedMessageRow = MessageRow & {
   reply_body?: string | null;
 };
 
+const ACTIVE_CONN_KEY = 'randomlink_active_conn';
+
+type StoredActiveConn = { connectionId: string; mode: ChatMode };
+
+function saveActiveConn(connectionId: string, mode: ChatMode) {
+  try {
+    localStorage.setItem(ACTIVE_CONN_KEY, JSON.stringify({ connectionId, mode }));
+  } catch {}
+}
+
+function readActiveConn(): StoredActiveConn | null {
+  try {
+    const raw = localStorage.getItem(ACTIVE_CONN_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed?.connectionId && parsed?.mode) return parsed as StoredActiveConn;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function clearActiveConn() {
+  try { localStorage.removeItem(ACTIVE_CONN_KEY); } catch {}
+}
+
 export default function App() {
   const { session, loading, refreshProfile, signOut } = useSession();
   const { theme, toggle } = useTheme();
@@ -115,6 +141,7 @@ function ChatApp({
   const [connectedAt, setConnectedAt] = useState<number | null>(null);
   const [incomingInvitation, setIncomingInvitation] = useState<ConnectionRow | null>(null);
   const [inviterProfile, setInviterProfile] = useState<any | null>(null);
+  const [checkingRejoin, setCheckingRejoin] = useState(true);
 
   const peerRef = useRef<PeerConnection | null>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
@@ -126,6 +153,7 @@ function ChatApp({
   const connectedAtRef = useRef<number | null>(null);
   const phaseRef = useRef<Phase>(phase);
   const isInitializingRef = useRef(false);
+  const hasAttemptedRejoinRef = useRef(false);
 
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { connRef.current = conn; }, [conn]);
@@ -216,6 +244,7 @@ function ChatApp({
 
     setPhase('connected');
     setConnectedAt(Date.now());
+    saveActiveConn(incomingInvitation.id, directMode);
     
     if (directMode === 'video') {
       const peer = new PeerConnection(incomingInvitation, myId, {
@@ -327,6 +356,7 @@ function ChatApp({
         setConn(incoming);
         setPhase('connected');
         setConnectedAt(Date.now());
+        saveActiveConn(incoming.id, incoming.mode);
 
         if (incoming.mode === 'video') {
           const peer = new PeerConnection(incoming, myId, {
@@ -361,6 +391,7 @@ function ChatApp({
           setConn(result.conn);
           setPhase('connected');
           setConnectedAt(Date.now());
+          saveActiveConn(result.conn.id, result.conn.mode);
           
           if (selectedMode === 'video') {
             const peer = new PeerConnection(result.conn, myId, {
@@ -427,6 +458,7 @@ function ChatApp({
         .from('connections')
         .select('*')
         .eq('mode', 'text')
+        .neq('status', 'ended')
         .or(`and(initiator_id.eq.${myId},responder_id.eq.${friendId}),and(initiator_id.eq.${friendId},responder_id.eq.${myId})`)
         .order('created_at', { ascending: false })
         .limit(1)
@@ -436,6 +468,7 @@ function ChatApp({
         setConn(existing);
         setPhase('connected');
         setConnectedAt(Date.now());
+        saveActiveConn(existing.id, 'text');
         isInitializingRef.current = false;
         return;
       }
@@ -462,6 +495,7 @@ function ChatApp({
     setConn(directConn);
     setPhase('connected');
     setConnectedAt(Date.now());
+    saveActiveConn(directConn.id, directMode);
 
     if (directMode === 'video') {
       const peer = new PeerConnection(directConn, myId, {
@@ -489,6 +523,7 @@ function ChatApp({
     await leaveWaitingRoom(myId);
     unsubIncomingRef.current?.();
     unsubIncomingRef.current = null;
+    clearActiveConn();
     setConn(null);
     setConnectedAt(null);
     startSearching(modeRef.current);
@@ -501,11 +536,96 @@ function ChatApp({
     unsubIncomingRef.current?.();
     unsubIncomingRef.current = null;
     stopLocalStream();
+    clearActiveConn();
     setConn(null);
     setPhase('lobby');
     setConnectedAt(null);
     setError(null);
   }, [myId, teardownPeer, stopLocalStream]);
+
+  /**
+   * Attempts to restore a previously-active connection after a page
+   * refresh or browser restart. Reads the locally-stored connection id,
+   * checks it's still 'connected' in the DB, and if so drops the user
+   * straight back into ChatRoom instead of the lobby. For video, this
+   * re-acquires the camera/mic and redoes the WebRTC handshake with the
+   * same partner over the same connection_id (renegotiate). For text,
+   * message history loads naturally via the existing syncMessages flow.
+   */
+  const rejoinConnection = useCallback(async (stored: StoredActiveConn) => {
+    const { data: row, error } = await supabase
+      .from('connections')
+      .select('*')
+      .eq('id', stored.connectionId)
+      .maybeSingle();
+
+    if (error || !row || row.status !== 'connected') {
+      clearActiveConn();
+      return false;
+    }
+
+    const c = row as ConnectionRow;
+    setMode(c.mode);
+    setConn(c);
+    setPhase('connected');
+    setConnectedAt(Date.now());
+
+    if (c.mode === 'video') {
+      let stream: MediaStream | null = null;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
+        setLocalStream(stream);
+      } catch (err: any) {
+        // Couldn't get camera back (denied/unavailable) — fall back to
+        // lobby rather than sitting in a broken video room.
+        setError('Could not access camera/microphone to reconnect. ' + (err?.message ?? ''));
+        clearActiveConn();
+        setPhase('lobby');
+        setConn(null);
+        setConnectedAt(null);
+        return false;
+      }
+
+      const peer = new PeerConnection(c, myId, {
+        onRemoteStream: (s) => setRemoteStream(s),
+        onDisconnected: () => handleStop(),
+        onError: (e) => console.error(e),
+      });
+      peerRef.current = peer;
+      await peer.attachLocalStream(stream);
+      try {
+        await peer.renegotiate();
+      } catch (err) {
+        // Partner never came back / handshake failed — leave gracefully
+        // rather than getting stuck.
+        handleStop();
+        return false;
+      }
+    }
+    // Text mode needs nothing else here — TextRoom loads history itself
+    // via syncMessages() keyed on conn.id, and the Realtime message
+    // subscription re-subscribes fresh on mount.
+    return true;
+  }, [myId, handleStop]);
+
+  // On mount, check whether we were mid-chat before a refresh/browser
+  // close and silently rejoin instead of dropping the user in the lobby.
+  useEffect(() => {
+    if (hasAttemptedRejoinRef.current) return;
+    hasAttemptedRejoinRef.current = true;
+
+    const stored = readActiveConn();
+    if (!stored) {
+      setCheckingRejoin(false);
+      return;
+    }
+
+    rejoinConnection(stored).finally(() => setCheckingRejoin(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const toggleCam = useCallback(() => {
     if (!localStream) return;
@@ -520,6 +640,14 @@ function ChatApp({
     localStream.getAudioTracks().forEach((t) => (t.enabled = newMic));
     setMicOn(newMic);
   }, [localStream, micOn]);
+
+  if (checkingRejoin) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-bg">
+        <Loader2 className="h-8 w-8 animate-spin text-accent" />
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-h-screen flex-col bg-bg text-ink overflow-x-hidden relative">
@@ -1153,12 +1281,8 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Connec
   };
 
   const send = async (textBody?: string) => {
-    console.log('[SEND CALLED] input was:', JSON.stringify(input), 'sending flag was:', sending, 'textBody arg:', textBody);
     const body = (textBody ?? input).trim();
-    if (!body || sending) {
-      console.log('[SEND BLOCKED] body empty?', !body, '| sending stuck true?', sending);
-      return;
-    }
+    if (!body || sending) return;
     if (!textBody) setInput('');
     setSending(true);
 
@@ -1173,12 +1297,8 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Connec
       reply_body: replyTarget ? replyTarget.body : null
     };
 
-    setMessages((prev) => {
-      console.log('[SEND] About to add optimistic message. prev.length =', prev.length, 'new message body:', optimisticMessage.body);
-      return [...prev, optimisticMessage];
-    });
-    console.log('[SEND] setMessages call completed, optimisticMessage was:', optimisticMessage);
-    
+    setMessages((prev) => [...prev, optimisticMessage]);
+
     // Store it so we can push properly, then instantly clear the UI state
     const currentReplyTarget = replyTarget;
     setReplyTarget(null);
@@ -1187,17 +1307,15 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Connec
     if (currentReplyTarget) payload.reply_to_id = currentReplyTarget.id;
 
     try {
-      console.log('[SEND] About to call supabase.insert with payload:', payload);
       const { data, error } = await supabase.from('messages').insert(payload).select().maybeSingle();
-      console.log('[SEND] Supabase insert returned. data:', data, 'error:', error);
       if (!error && data) {
         setMessages((prev) => prev.map((msg) => (msg.id === temporaryId ? { ...data, reply_body: optimisticMessage.reply_body } : msg)));
       } else {
-        console.log('[SEND FAILED] Supabase error inserting message:', JSON.stringify(error), 'payload was:', payload);
+        console.error('Failed to send message:', error);
         syncMessages(); // Recovery mechanism
       }
-    } catch (e: any) {
-      console.log('[SEND THREW] Exception while sending message:', e?.message, e, 'payload was:', payload);
+    } catch (e) {
+      console.error('Exception sending message:', e);
       syncMessages(); // Recovery mechanism
     } finally {
       setSending(false); // Unlocks input bar no matter what happens
@@ -1218,12 +1336,17 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Connec
     }
   };
 
-  console.log('[RENDER] TextRoom rendering with messages.length =', messages.length, 'conn.id =', conn.id);
-
   return (
     <div className="flex h-screen sm:h-[68vh] flex-col overflow-hidden sm:rounded-2xl border border-line bg-bg w-full">
       <div className="flex items-center justify-between p-4 border-b border-line bg-bg-elev">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2.5">
+          {partnerProfile?.avatar_url ? (
+            <img src={partnerProfile.avatar_url} alt="" className="h-9 w-9 rounded-full object-cover border border-line" />
+          ) : (
+            <div className="h-9 w-9 rounded-full bg-accent/10 flex items-center justify-center">
+              <User className="h-4 w-4 text-accent" />
+            </div>
+          )}
           <span className="text-sm font-semibold">{partnerProfile?.display_name || 'Stranger'}</span>
           <FriendActionButton myId={myId} partnerId={conn.initiator_id === myId ? conn.responder_id : conn.initiator_id} />
         </div>
@@ -1479,7 +1602,7 @@ function formatTime(s: number) {
 function Footer() {
   return (
     <footer className="w-full border-t border-line px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] text-center text-xs text-ink-faint">
-      Be respectful. Use Next to skip anyone. Developed By the Ashonlogist.
+      Be respectful. Use Next to skip anyone.
     </footer>
   );
 }
