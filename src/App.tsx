@@ -9,6 +9,7 @@ import {
   pruneStaleWaiting,
   pruneStaleConnections,
   recordAffinity,
+  endConnection,
 } from './lib/matching';
 import { useSession } from './lib/useSession';
 import { useTheme } from './lib/useTheme';
@@ -242,7 +243,7 @@ function ChatApp({
 
   const rejectIncomingCall = async () => {
     if (!incomingInvitation) return;
-    await supabase.from('connections').update({ status: 'ended' }).eq('id', incomingInvitation.id);
+    await endConnection(incomingInvitation.id);
     setIncomingInvitation(null);
   };
 
@@ -276,6 +277,13 @@ function ChatApp({
       const partnerId = c.initiator_id === myId ? c.responder_id : c.initiator_id;
       const dur = (Date.now() - startedAt) / 1000;
       recordAffinity(myId, partnerId, c.id, dur).catch(() => {});
+    }
+    // Mark the connection as ended in the DB. Without this, the partner's
+    // realtime listener (status === 'ended') never fires, so they're left
+    // stranded in the room, and LiveChatStats keeps counting this row as
+    // "connected" forever since nothing ever moves it out of that status.
+    if (c) {
+      endConnection(c.id).catch(() => {});
     }
     if (peerRef.current) {
       await peerRef.current.close();
@@ -1382,9 +1390,14 @@ function LiveChatStats() {
   });
 
   const fetchStats = useCallback(async () => {
+    // Belt-and-suspenders: even though teardownPeer now correctly marks
+    // connections as 'ended' on exit, also cap how old a "connected" row
+    // can be before we stop counting it. Keeps stats accurate even if a
+    // tab is abandoned mid-chat (covered by pruneStaleConnections too).
+    const recentCutoff = new Date(Date.now() - 4 * 60 * 60 * 1000).toISOString();
     const [{ data: waiting }, { data: activeConns }] = await Promise.all([
       supabase.from('waiting_room').select('mode'),
-      supabase.from('connections').select('mode').eq('status', 'connected')
+      supabase.from('connections').select('mode').eq('status', 'connected').gte('created_at', recentCutoff)
     ]);
 
     const newStats = { video: { online: 0, chatting: 0 }, text: { online: 0, chatting: 0 } };
