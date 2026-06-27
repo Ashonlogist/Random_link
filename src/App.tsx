@@ -1153,8 +1153,12 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Connec
   };
 
   const send = async (textBody?: string) => {
+    console.log('[SEND CALLED] input was:', JSON.stringify(input), 'sending flag was:', sending, 'textBody arg:', textBody);
     const body = (textBody ?? input).trim();
-    if (!body || sending) return;
+    if (!body || sending) {
+      console.log('[SEND BLOCKED] body empty?', !body, '| sending stuck true?', sending);
+      return;
+    }
     if (!textBody) setInput('');
     setSending(true);
 
