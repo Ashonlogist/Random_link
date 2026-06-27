@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Video, MessageSquare, Shuffle, X, Send, Loader2, Camera, ArrowLeft, Sparkles, LogOut, Sun, Moon, Menu, Paperclip, Download, User, Edit, UserPlus, Check, CornerUpLeft, PhoneCall, PhoneOff, UserMinus } from 'lucide-react';
+import { Video, MessageSquare, Shuffle, X, Send, Loader2, Camera, ArrowLeft, Sparkles, LogOut, Sun, Moon, Menu, Paperclip, Download, User, Edit, UserPlus, Check, CornerUpLeft, PhoneCall, PhoneOff, UserMinus, Radar } from 'lucide-react';
 import { supabase, type ChatMode, type ConnectionRow, type MessageRow, type Profile } from './lib/supabase';
 import { PeerConnection } from './lib/webrtc';
 import {
@@ -10,7 +10,9 @@ import {
   pruneStaleConnections,
   recordAffinity,
   endConnection,
+  pollForMatch,
 } from './lib/matching';
+import { subscribeToPush, syncSessionTokenToServiceWorker, sendPushTo } from './lib/push';
 import { useSession } from './lib/useSession';
 import { useTheme } from './lib/useTheme';
 import { AuthScreen } from './components/AuthScreen';
@@ -48,6 +50,29 @@ function readActiveConn(): StoredActiveConn | null {
 
 function clearActiveConn() {
   try { localStorage.removeItem(ACTIVE_CONN_KEY); } catch {}
+}
+
+// ---- Unread message tracking (per friend) ----
+// Stored locally as { [friendId]: isoTimestamp } — "I have read everything
+// this friend sent up to this time." Not synced across devices, but needs
+// no schema change and is good enough for a WhatsApp-style badge.
+const LAST_READ_KEY = 'randomlink_last_read';
+
+function getLastReadMap(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(LAST_READ_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function markFriendRead(friendId: string) {
+  try {
+    const map = getLastReadMap();
+    map[friendId] = new Date().toISOString();
+    localStorage.setItem(LAST_READ_KEY, JSON.stringify(map));
+  } catch {}
 }
 
 export default function App() {
@@ -142,6 +167,7 @@ function ChatApp({
   const [incomingInvitation, setIncomingInvitation] = useState<ConnectionRow | null>(null);
   const [inviterProfile, setInviterProfile] = useState<any | null>(null);
   const [checkingRejoin, setCheckingRejoin] = useState(true);
+  const [unreadTotal, setUnreadTotal] = useState(0);
 
   const peerRef = useRef<PeerConnection | null>(null);
   const localVideoRef = useRef<HTMLVideoElement>(null);
@@ -154,6 +180,8 @@ function ChatApp({
   const phaseRef = useRef<Phase>(phase);
   const isInitializingRef = useRef(false);
   const hasAttemptedRejoinRef = useRef(false);
+  const backgroundSearchingRef = useRef(false);
+  const [backgroundSearching, setBackgroundSearching] = useState(false);
 
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { connRef.current = conn; }, [conn]);
@@ -167,6 +195,26 @@ function ChatApp({
     }, 15000);
     return () => { if (pruneTimerRef.current) clearInterval(pruneTimerRef.current); };
   }, []);
+
+  // Set up real Web Push: subscribe this device if permission is already
+  // granted, and keep the service worker's cached session token fresh so
+  // it can authenticate actions taken from a notification (reply, accept
+  // friend request) even when no tab is open when the click happens.
+  useEffect(() => {
+    syncSessionTokenToServiceWorker();
+    if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+      subscribeToPush(myId);
+    }
+    const { data: authListener } = supabase.auth.onAuthStateChange(() => {
+      syncSessionTokenToServiceWorker();
+    });
+    return () => { authListener.subscription.unsubscribe(); };
+  }, [myId]);
+
+  // Receive messages bounced back from the service worker when a
+  // notification (or one of its action buttons) is clicked. (Defined
+  // further down, after handleStop, to avoid a reference-before-
+  // declaration issue — see below.)
 
   useEffect(() => {
     const friendChannel = supabase.channel('live_friendships_requests')
@@ -350,6 +398,42 @@ function ChatApp({
       unsubIncomingRef.current?.();
       unsubIncomingRef.current = subscribeToIncomingMatches(myId, async (incoming) => {
         if (peerRef.current || isInitializingRef.current) return;
+
+        if (backgroundSearchingRef.current) {
+          // User is browsing elsewhere (Lobby) rather than watching the
+          // Searching screen. Don't auto-join — let them choose via the
+          // notification's Accept/Ignore actions instead.
+          const partnerId = incoming.initiator_id === myId ? incoming.responder_id : incoming.initiator_id;
+          const { data: partner } = await supabase.from('profiles').select('display_name, avatar_url').eq('user_id', partnerId).maybeSingle();
+
+          const notifTitle = "You've been paired! 🎉";
+          const notifBody = `${partner?.display_name || 'Someone'} is ready to ${incoming.mode === 'video' ? 'video chat' : 'chat'} with you.`;
+          const actions = [
+            { action: 'pair_accept', title: 'Join now' },
+            { action: 'pair_ignore', title: 'Keep searching' },
+          ];
+
+          if ('Notification' in window && Notification.permission === 'granted') {
+            const registration = await navigator.serviceWorker.ready;
+            registration.showNotification(notifTitle, {
+              body: notifBody,
+              icon: partner?.avatar_url || undefined,
+              tag: incoming.id,
+              renotify: true,
+              requireInteraction: true,
+              data: { connectionId: incoming.id, myId },
+              actions,
+            });
+          }
+          // Note: we don't also call sendPushTo here — this callback is
+          // only running because our tab is open (even if backgrounded),
+          // so the in-page notification above already reaches us. Real
+          // push (for when our tab is fully closed) is triggered by the
+          // OTHER side, right when they create the match — see the
+          // findMatch() result branch below.
+          return;
+        }
+
         isInitializingRef.current = true;
         
         pushMatchNotification(incoming);
@@ -382,9 +466,20 @@ function ChatApp({
       });
 
       try {
+        // While backgrounded, don't actively poll/claim a partner — our
+        // local media stream may have been stopped (see
+        // goToBackgroundSearch) and an initiator role needs it live
+        // immediately. Just stay registered in waiting_room and rely on
+        // the passive subscribeToIncomingMatches listener above, which
+        // already handles the backgrounded case via a notification.
+        if (backgroundSearchingRef.current) {
+          isInitializingRef.current = false;
+          return;
+        }
+
         const result = await findMatch(myId, selectedMode);
         if (result) {
-          if (peerRef.current || isInitializingRef.current) return;
+          if (peerRef.current || isInitializingRef.current || backgroundSearchingRef.current) return;
           isInitializingRef.current = true;
 
           pushMatchNotification(result.conn);
@@ -392,6 +487,23 @@ function ChatApp({
           setPhase('connected');
           setConnectedAt(Date.now());
           saveActiveConn(result.conn.id, result.conn.mode);
+
+          // Notify the partner via real push too, in case their tab is
+          // fully closed (their own in-page subscription callback already
+          // covers the case where their tab is open/backgrounded — this
+          // is just the closed-tab fallback, harmless if it double-fires
+          // since the shared `tag` lets the browser de-duplicate).
+          sendPushTo(result.conn.responder_id, {
+            title: "You've been paired! 🎉",
+            body: `Someone is ready to ${selectedMode === 'video' ? 'video chat' : 'chat'} with you.`,
+            tag: result.conn.id,
+            data: { connectionId: result.conn.id },
+            actions: [
+              { action: 'pair_accept', title: 'Join now' },
+              { action: 'pair_ignore', title: 'Keep searching' },
+            ],
+            requireInteraction: true,
+          }).catch(() => {});
           
           if (selectedMode === 'video') {
             const peer = new PeerConnection(result.conn, myId, {
@@ -420,6 +532,90 @@ function ChatApp({
     },
     [myId, pushMatchNotification]
   );
+
+  // Background search polling: while the user has chosen to keep
+  // searching from the Lobby (rather than watching the Searching screen),
+  // periodically try to claim a waiting partner ourselves, since the
+  // passive subscription alone only catches the case where SOMEONE ELSE
+  // claims us. A match found here means we became the initiator — show
+  // the same Accept/Ignore notification rather than auto-joining, since
+  // the user isn't actively watching for it.
+  useEffect(() => {
+    if (!backgroundSearching) return;
+
+    const poll = async () => {
+      if (!backgroundSearchingRef.current || isInitializingRef.current || peerRef.current) return;
+      try {
+        const conn = await pollForMatch(myId, modeRef.current);
+        if (conn && backgroundSearchingRef.current) {
+          // We just became the initiator of a fresh match while
+          // backgrounded. We actively chose to keep searching, so join
+          // immediately ourselves (no Accept/Ignore needed on our side —
+          // that's only shown to the *responder*, notified below).
+          isInitializingRef.current = true;
+          backgroundSearchingRef.current = false;
+          setBackgroundSearching(false);
+          setMode(conn.mode);
+          setConn(conn);
+          setPhase('connected');
+          setConnectedAt(Date.now());
+          saveActiveConn(conn.id, conn.mode);
+
+          if (conn.mode === 'video') {
+            try {
+              const freshStream = await navigator.mediaDevices.getUserMedia({
+                video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+                audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+              });
+              setLocalStream(freshStream);
+              const peer = new PeerConnection(conn, myId, {
+                onRemoteStream: (s) => setRemoteStream(s),
+                onDisconnected: () => handleNext(),
+                onError: (e) => console.error(e),
+              });
+              peerRef.current = peer;
+              await peer.attachLocalStream(freshStream);
+              await peer.createOffer();
+            } catch (err) {
+              console.error('Failed to self-join video match from background:', err);
+              handleNext();
+            }
+          }
+          isInitializingRef.current = false;
+
+          const { data: partner } = await supabase
+            .from('profiles')
+            .select('display_name, avatar_url')
+            .eq('user_id', conn.responder_id)
+            .maybeSingle();
+
+          const notifTitle = "You've been paired! 🎉";
+          const notifBody = `${partner?.display_name || 'Someone'} is ready to ${conn.mode === 'video' ? 'video chat' : 'chat'} with you.`;
+          const actions = [
+            { action: 'pair_accept', title: 'Join now' },
+            { action: 'pair_ignore', title: 'Keep searching' },
+          ];
+
+          // Notify the RESPONDER (the other person) — this is the side
+          // that needs the Accept/Ignore choice, since they didn't
+          // actively initiate this particular match.
+          sendPushTo(conn.responder_id, {
+            title: notifTitle,
+            body: notifBody,
+            tag: conn.id,
+            data: { connectionId: conn.id },
+            actions,
+            requireInteraction: true,
+          }).catch(() => {});
+        }
+      } catch (err) {
+        console.error('Background search poll failed:', err);
+      }
+    };
+
+    const interval = window.setInterval(poll, 6000);
+    return () => clearInterval(interval);
+  }, [backgroundSearching, myId]);
 
   const startDirectCall = useCallback(async (friendId: string, directMode: ChatMode) => {
     if (isInitializingRef.current) return;
@@ -531,6 +727,8 @@ function ChatApp({
 
   const handleStop = useCallback(async () => {
     isInitializingRef.current = false;
+    backgroundSearchingRef.current = false;
+    setBackgroundSearching(false);
     await teardownPeer();
     await leaveWaitingRoom(myId);
     unsubIncomingRef.current?.();
@@ -542,6 +740,30 @@ function ChatApp({
     setConnectedAt(null);
     setError(null);
   }, [myId, teardownPeer, stopLocalStream]);
+
+  /**
+   * "Search in background": keep the waiting_room entry and the
+   * subscribeToIncomingMatches listener alive, but return to the Lobby UI
+   * instead of the Searching spinner. A match found while backgrounded
+   * triggers a notification with Accept/Ignore instead of auto-joining
+   * (see subscribeToIncomingMatches callback in startSearching above).
+   */
+  const goToBackgroundSearch = useCallback(() => {
+    backgroundSearchingRef.current = true;
+    setBackgroundSearching(true);
+    setPhase('lobby');
+    // Stop the camera while backgrounded — re-acquired fresh the moment
+    // the user accepts a match (see the OPEN_CONNECTION message handler).
+    // Leaving the camera light on while browsing elsewhere would be
+    // unexpected and isn't needed since we're not actively in a call yet.
+    stopLocalStream();
+  }, [stopLocalStream]);
+
+  const stopBackgroundSearch = useCallback(async () => {
+    backgroundSearchingRef.current = false;
+    setBackgroundSearching(false);
+    await handleStop();
+  }, [handleStop]);
 
   /**
    * Attempts to restore a previously-active connection after a page
@@ -627,6 +849,55 @@ function ChatApp({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Receive messages bounced back from the service worker when a
+  // notification (or one of its action buttons) is clicked.
+  useEffect(() => {
+    const handler = async (event: MessageEvent) => {
+      const msg = event.data;
+      if (!msg || typeof msg !== 'object') return;
+
+      if (msg.type === 'OPEN_CONNECTION' && msg.connectionId) {
+        const { data: row } = await supabase.from('connections').select('*').eq('id', msg.connectionId).maybeSingle();
+        if (row && row.status !== 'ended') {
+          setMode(row.mode);
+          setConn(row as ConnectionRow);
+          setPhase('connected');
+          setConnectedAt(Date.now());
+          saveActiveConn(row.id, row.mode);
+          if (row.mode === 'video' && !peerRef.current) {
+            try {
+              const stream = await navigator.mediaDevices.getUserMedia({
+                video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+                audio: { echoCancellation: true, noiseSuppression: true },
+              });
+              setLocalStream(stream);
+              const peer = new PeerConnection(row as ConnectionRow, myId, {
+                onRemoteStream: (s) => setRemoteStream(s),
+                onDisconnected: () => handleStop(),
+                onError: (e) => console.error(e),
+              });
+              peerRef.current = peer;
+              await peer.attachLocalStream(stream);
+              await peer.renegotiate();
+            } catch (err) {
+              console.error('Failed to join video from notification:', err);
+            }
+          }
+        }
+      }
+
+      if (msg.type === 'PAIR_IGNORED' && msg.connectionId) {
+        // User chose "Ignore" on a background-search pairing notification.
+        // End that connection on our side and keep searching for someone else.
+        await endConnection(msg.connectionId);
+      }
+    };
+
+    navigator.serviceWorker?.addEventListener('message', handler);
+    return () => navigator.serviceWorker?.removeEventListener('message', handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [myId]);
+
   const toggleCam = useCallback(() => {
     if (!localStream) return;
     const newCam = !camOn;
@@ -654,8 +925,10 @@ function ChatApp({
       {phase !== 'connected' && (
         <Header
           profile={profile}
+          myId={myId}
           onOpenProfile={onOpenProfile}
           onToggleDrawer={() => setFriendsDrawerOpen(!friendsDrawerOpen)}
+          unreadTotal={unreadTotal}
         />
       )}
 
@@ -679,8 +952,16 @@ function ChatApp({
             {error}
           </div>
         )}
-        {phase === 'lobby' && <Lobby onStart={startSearching} profile={profile} />}
-        {phase === 'searching' && <Searching mode={mode} onCancel={handleStop} />}
+        {phase === 'lobby' && (
+          <Lobby
+            onStart={startSearching}
+            profile={profile}
+            backgroundSearching={backgroundSearching}
+            backgroundMode={mode}
+            onStopBackgroundSearch={stopBackgroundSearch}
+          />
+        )}
+        {phase === 'searching' && <Searching mode={mode} onCancel={handleStop} onGoBackground={goToBackgroundSearch} />}
         {phase === 'connected' && conn && (
           <ChatRoom
             conn={conn}
@@ -701,7 +982,7 @@ function ChatApp({
         )}
       </main>
 
-      <FriendsDrawer isOpen={friendsDrawerOpen} onClose={() => setFriendsDrawerOpen(false)} myId={myId} onDirectCall={startDirectCall} />
+      <FriendsDrawer isOpen={friendsDrawerOpen} onClose={() => setFriendsDrawerOpen(false)} myId={myId} onDirectCall={startDirectCall} onUnreadTotalChange={setUnreadTotal} />
 
       {phase !== 'connected' && <Footer />}
     </div>
@@ -710,16 +991,27 @@ function ChatApp({
 
 function Header({
   profile,
+  myId,
   onOpenProfile,
   onToggleDrawer,
+  unreadTotal,
 }: {
   profile: ExtendedProfile;
+  myId: string;
   onOpenProfile: () => void;
   onToggleDrawer: () => void;
+  unreadTotal: number;
 }) {
   const [perm, setPerm] = useState<NotificationPermission>('default');
   useEffect(() => { if ('Notification' in window) setPerm(Notification.permission); }, []);
-  const enableAlerts = async () => { if ('Notification' in window) setPerm(await Notification.requestPermission()); };
+  const enableAlerts = async () => {
+    if (!('Notification' in window)) return;
+    const result = await Notification.requestPermission();
+    setPerm(result);
+    if (result === 'granted') {
+      subscribeToPush(myId);
+    }
+  };
 
   return (
     <header className="sticky top-0 z-30 w-full border-b border-line bg-bg/80 backdrop-blur-lg">
@@ -757,10 +1049,15 @@ function Header({
 
           <button
             onClick={onToggleDrawer}
-            className="flex h-9 w-9 items-center justify-center rounded-xl border border-line bg-bg-elev text-ink-muted transition hover:text-ink"
+            className="relative flex h-9 w-9 items-center justify-center rounded-xl border border-line bg-bg-elev text-ink-muted transition hover:text-ink"
             title="Open DMs"
           >
             <Menu className="h-4 w-4" />
+            {unreadTotal > 0 && (
+              <span className="absolute -top-1.5 -right-1.5 flex h-5 min-w-[20px] items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-bold text-white shadow-sm">
+                {unreadTotal > 99 ? '99+' : unreadTotal}
+              </span>
+            )}
           </button>
         </div>
       </div>
@@ -768,7 +1065,7 @@ function Header({
   );
 }
 
-function Lobby({ onStart, profile }: { onStart: (mode: ChatMode) => void; profile: ExtendedProfile }) {
+function Lobby({ onStart, profile, backgroundSearching, backgroundMode, onStopBackgroundSearch }: { onStart: (mode: ChatMode) => void; profile: ExtendedProfile; backgroundSearching: boolean; backgroundMode: ChatMode; onStopBackgroundSearch: () => void }) {
   return (
     <div className="flex w-full max-w-3xl flex-col items-center text-center">
       <h1 className="mt-2 bg-gradient-to-r from-accent to-accent-2 bg-clip-text text-4xl font-bold tracking-tight text-transparent sm:text-5xl">
@@ -778,12 +1075,36 @@ function Lobby({ onStart, profile }: { onStart: (mode: ChatMode) => void; profil
         Get paired with someone new. Open the side menu anytime to chat with friends.
       </p>
 
+      {backgroundSearching && (
+        <div className="mt-5 w-full max-w-md rounded-2xl border border-accent/30 bg-accent/5 px-4 py-3 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 text-left">
+            <div className="relative flex h-9 w-9 items-center justify-center flex-shrink-0">
+              <span className="absolute inset-0 animate-ping rounded-full bg-accent/30" />
+              <Radar className="relative h-5 w-5 text-accent" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-ink">
+                Still looking for a {backgroundMode === 'video' ? 'video' : 'text'} match…
+              </p>
+              <p className="text-xs text-ink-muted">We'll notify you the moment someone's ready.</p>
+            </div>
+          </div>
+          <button
+            onClick={onStopBackgroundSearch}
+            className="flex-shrink-0 rounded-lg border border-line bg-bg px-2.5 py-1.5 text-xs font-medium text-ink-muted hover:text-ink transition"
+          >
+            Stop
+          </button>
+        </div>
+      )}
+
       <LiveChatStats />
 
       <div className="mt-8 grid w-full grid-cols-1 gap-4 sm:grid-cols-2">
         <button
           onClick={() => onStart('video')}
-          className="group relative overflow-hidden rounded-2xl border bg-gradient-to-br p-6 text-left transition-all duration-300 hover:scale-[1.02] hover:shadow-xl border-sky-400/30"
+          disabled={backgroundSearching}
+          className="group relative overflow-hidden rounded-2xl border bg-gradient-to-br p-6 text-left transition-all duration-300 hover:scale-[1.02] hover:shadow-xl border-sky-400/30 disabled:opacity-40 disabled:hover:scale-100 disabled:cursor-not-allowed"
         >
           <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-sky-500/15 text-sky-500 transition-transform duration-300 group-hover:scale-110">
             <Video className="h-7 w-7" />
@@ -794,7 +1115,8 @@ function Lobby({ onStart, profile }: { onStart: (mode: ChatMode) => void; profil
 
         <button
           onClick={() => onStart('text')}
-          className="group relative overflow-hidden rounded-2xl border bg-gradient-to-br p-6 text-left transition-all duration-300 hover:scale-[1.02] hover:shadow-xl border-emerald-400/30"
+          disabled={backgroundSearching}
+          className="group relative overflow-hidden rounded-2xl border bg-gradient-to-br p-6 text-left transition-all duration-300 hover:scale-[1.02] hover:shadow-xl border-emerald-400/30 disabled:opacity-40 disabled:hover:scale-100 disabled:cursor-not-allowed"
         >
           <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-600 transition-transform duration-300 group-hover:scale-110">
             <MessageSquare className="h-7 w-7" />
@@ -807,9 +1129,10 @@ function Lobby({ onStart, profile }: { onStart: (mode: ChatMode) => void; profil
   );
 }
 
-function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolean; onClose: () => void; myId: string; onDirectCall: (id: string, mode: ChatMode) => void }) {
+function FriendsDrawer({ isOpen, onClose, myId, onDirectCall, onUnreadTotalChange }: { isOpen: boolean; onClose: () => void; myId: string; onDirectCall: (id: string, mode: ChatMode) => void; onUnreadTotalChange: (total: number) => void }) {
   const [friends, setFriends] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [unreadByFriend, setUnreadByFriend] = useState<Record<string, number>>({});
 
   const fetchFriends = useCallback(async () => {
     setLoading(true);
@@ -831,6 +1154,89 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
     setLoading(false);
   }, [myId]);
 
+  // Compute unread counts: for each friend, count messages they sent (in
+  // any connection between us) that are newer than our last-read timestamp
+  // for them.
+  const refreshUnreadCounts = useCallback(async (friendIds: string[]) => {
+    if (friendIds.length === 0) {
+      setUnreadByFriend({});
+      onUnreadTotalChange(0);
+      return;
+    }
+    const lastReadMap = getLastReadMap();
+
+    // Find all connections between me and any of these friends (text or
+    // video, any status) so we catch messages regardless of which
+    // specific connection row they landed in.
+    const orClauses = friendIds
+      .map((fid) => `and(initiator_id.eq.${myId},responder_id.eq.${fid}),and(initiator_id.eq.${fid},responder_id.eq.${myId})`)
+      .join(',');
+    const { data: conns } = await supabase
+      .from('connections')
+      .select('id, initiator_id, responder_id')
+      .or(orClauses);
+
+    if (!conns || conns.length === 0) {
+      setUnreadByFriend({});
+      onUnreadTotalChange(0);
+      return;
+    }
+
+    const connIdToFriend: Record<string, string> = {};
+    conns.forEach((c) => {
+      const friendId = c.initiator_id === myId ? c.responder_id : c.initiator_id;
+      connIdToFriend[c.id] = friendId;
+    });
+
+    const { data: msgs } = await supabase
+      .from('messages')
+      .select('id, connection_id, sender_id, created_at')
+      .in('connection_id', Object.keys(connIdToFriend))
+      .neq('sender_id', myId);
+
+    const counts: Record<string, number> = {};
+    (msgs || []).forEach((m) => {
+      const friendId = connIdToFriend[m.connection_id];
+      if (!friendId) return;
+      const lastRead = lastReadMap[friendId];
+      if (!lastRead || new Date(m.created_at) > new Date(lastRead)) {
+        counts[friendId] = (counts[friendId] || 0) + 1;
+      }
+    });
+
+    setUnreadByFriend(counts);
+    onUnreadTotalChange(Object.values(counts).reduce((a, b) => a + b, 0));
+  }, [myId, onUnreadTotalChange]);
+
+  useEffect(() => {
+    if (friends.length > 0) {
+      refreshUnreadCounts(friends.map((f) => f.user_id));
+    } else {
+      onUnreadTotalChange(0);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [friends]);
+
+  // Keep unread counts live: refresh whenever a new message arrives from
+  // any of our friends, even while the drawer is closed (so the header
+  // badge stays accurate without requiring the drawer to be open).
+  useEffect(() => {
+    if (friends.length === 0) return;
+    const channel = supabase
+      .channel(`unread_watch_${myId}`)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'messages' }, () => {
+        refreshUnreadCounts(friends.map((f) => f.user_id));
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [friends, myId, refreshUnreadCounts]);
+
+  useEffect(() => {
+    // Always fetch friends (needed for the header unread badge even when
+    // the drawer itself is closed), not just while isOpen.
+    fetchFriends();
+  }, [fetchFriends]);
+
   useEffect(() => {
     if (!isOpen) return;
     fetchFriends();
@@ -846,16 +1252,35 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
 
   const handleUnfriend = async (friendId: string) => {
     if (!window.confirm("Are you sure you want to unfriend this user?")) return;
-    
+
+    const previousFriends = friends;
     // Instantly remove them visually while DB catches up
     setFriends(prev => prev.filter(f => f.user_id !== friendId));
 
-    const { error } = await supabase
+    const { error, count } = await supabase
       .from('friendships')
-      .delete()
+      .delete({ count: 'exact' })
       .or(`and(user_id.eq.${myId},friend_id.eq.${friendId}),and(user_id.eq.${friendId},friend_id.eq.${myId})`);
-      
-    if (!error) fetchFriends();
+
+    if (error) {
+      console.error('Failed to unfriend:', error);
+      setFriends(previousFriends); // revert optimistic removal
+      alert("Couldn't remove this friend. Please try again.");
+      return;
+    }
+
+    if (!count) {
+      // Delete "succeeded" (no error) but matched zero rows — almost
+      // always an RLS policy silently blocking the delete from this
+      // side of the friendship. Revert and let the user know instead of
+      // pretending it worked.
+      console.warn('Unfriend deleted 0 rows — likely an RLS policy issue.');
+      setFriends(previousFriends);
+      alert("Couldn't remove this friend (permission issue). Please try again.");
+      return;
+    }
+
+    fetchFriends();
   };
 
   return (
@@ -876,23 +1301,33 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
               <p className="text-sm">No connected friends yet. Add strangers during chat to build your friend list!</p>
             </div>
           ) : (
-            friends.map(f => (
-              <div key={f.user_id} className="flex items-center justify-between p-3 rounded-2xl bg-bg-elev border border-line shadow-sm hover:border-accent transition">
-                <div className="flex items-center gap-2.5">
-                  {f.avatar_url ? (
-                    <img src={f.avatar_url} alt="" className="h-10 w-10 rounded-full object-cover border border-line" />
-                  ) : (
-                    <div className="h-10 w-10 rounded-full bg-accent/10 flex items-center justify-center"><User className="h-5 w-5 text-accent" /></div>
-                  )}
-                  <span className="text-sm font-semibold tracking-tight">{f.display_name}</span>
+            friends.map(f => {
+              const unread = unreadByFriend[f.user_id] || 0;
+              return (
+                <div key={f.user_id} className="flex items-center justify-between p-3 rounded-2xl bg-bg-elev border border-line shadow-sm hover:border-accent transition">
+                  <div className="flex items-center gap-2.5">
+                    <div className="relative">
+                      {f.avatar_url ? (
+                        <img src={f.avatar_url} alt="" className="h-10 w-10 rounded-full object-cover border border-line" />
+                      ) : (
+                        <div className="h-10 w-10 rounded-full bg-accent/10 flex items-center justify-center"><User className="h-5 w-5 text-accent" /></div>
+                      )}
+                      {unread > 0 && (
+                        <span className="absolute -top-1 -right-1 flex h-5 min-w-[20px] items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-bold text-white shadow-sm">
+                          {unread > 99 ? '99+' : unread}
+                        </span>
+                      )}
+                    </div>
+                    <span className={`text-sm tracking-tight ${unread > 0 ? 'font-bold' : 'font-semibold'}`}>{f.display_name}</span>
+                  </div>
+                  <div className="flex gap-1.5">
+                    <button onClick={() => { markFriendRead(f.user_id); onDirectCall(f.user_id, 'text'); }} className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 transition" title="Text Chat"><MessageSquare className="h-4 w-4" /></button>
+                    <button onClick={() => { markFriendRead(f.user_id); onDirectCall(f.user_id, 'video'); }} className="p-2.5 rounded-xl bg-sky-500/10 text-sky-500 hover:bg-sky-500/20 transition" title="Video Call"><Video className="h-4 w-4" /></button>
+                    <button onClick={() => handleUnfriend(f.user_id)} className="p-2.5 rounded-xl bg-rose-500/10 text-rose-500 hover:bg-rose-500/20 transition" title="Unfriend"><UserMinus className="h-4 w-4" /></button>
+                  </div>
                 </div>
-                <div className="flex gap-1.5">
-                  <button onClick={() => onDirectCall(f.user_id, 'text')} className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/20 transition" title="Text Chat"><MessageSquare className="h-4 w-4" /></button>
-                  <button onClick={() => onDirectCall(f.user_id, 'video')} className="p-2.5 rounded-xl bg-sky-500/10 text-sky-500 hover:bg-sky-500/20 transition" title="Video Call"><Video className="h-4 w-4" /></button>
-                  <button onClick={() => handleUnfriend(f.user_id)} className="p-2.5 rounded-xl bg-rose-500/10 text-rose-500 hover:bg-rose-500/20 transition" title="Unfriend"><UserMinus className="h-4 w-4" /></button>
-                </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       </div>
@@ -900,7 +1335,7 @@ function FriendsDrawer({ isOpen, onClose, myId, onDirectCall }: { isOpen: boolea
   );
 }
 
-function Searching({ mode, onCancel }: { mode: ChatMode; onCancel: () => void }) {
+function Searching({ mode, onCancel, onGoBackground }: { mode: ChatMode; onCancel: () => void; onGoBackground: () => void }) {
   return (
     <div className="flex flex-col items-center text-center">
       <div className="relative flex h-24 w-24 items-center justify-center">
@@ -915,12 +1350,20 @@ function Searching({ mode, onCancel }: { mode: ChatMode; onCancel: () => void })
 
       <LiveChatStats />
 
-      <button
-        onClick={onCancel}
-        className="mt-8 inline-flex items-center gap-2 rounded-xl border border-line bg-bg-elev px-5 py-2.5 text-sm font-medium text-ink-muted transition hover:text-ink"
-      >
-        <X className="h-4 w-4" /> Cancel
-      </button>
+      <div className="mt-8 flex flex-col items-center gap-3">
+        <button
+          onClick={onGoBackground}
+          className="inline-flex items-center gap-2 rounded-xl bg-accent px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-accent-2"
+        >
+          <Radar className="h-4 w-4" /> Keep searching in background
+        </button>
+        <button
+          onClick={onCancel}
+          className="inline-flex items-center gap-2 rounded-xl border border-line bg-bg-elev px-5 py-2.5 text-sm font-medium text-ink-muted transition hover:text-ink"
+        >
+          <X className="h-4 w-4" /> Cancel
+        </button>
+      </div>
     </div>
   );
 }
@@ -1217,6 +1660,8 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Connec
 
   useEffect(() => {
     syncMessages();
+    const partnerId = conn.initiator_id === myId ? conn.responder_id : conn.initiator_id;
+    markFriendRead(partnerId);
     
     // Listen for partner disconnecting to gracefully unmount Room
     const sessionChannel = supabase.channel(`text_session_${conn.id}`)
@@ -1252,6 +1697,13 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Connec
                 actions: [{ action: 'reply', title: 'Reply', type: 'text', placeholder: 'Type response...' }]
               });
             });
+          }
+          if (String(newMsg.sender_id) !== String(myId)) {
+            // We're actively viewing this conversation, so anything that
+            // arrives counts as read immediately — keeps the unread badge
+            // from lighting up for a chat the user already has open.
+            const partnerId = conn.initiator_id === myId ? conn.responder_id : conn.initiator_id;
+            markFriendRead(partnerId);
           }
           return [...prev, newMsg];
         });
@@ -1602,7 +2054,7 @@ function formatTime(s: number) {
 function Footer() {
   return (
     <footer className="w-full border-t border-line px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] text-center text-xs text-ink-faint">
-      Be respectful. Use Next to skip anyone. Developed By the Ashonlogist.
+      Be respectful. Use Next to skip anyone.
     </footer>
   );
 }
