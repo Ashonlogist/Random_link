@@ -1602,7 +1602,7 @@ function formatTime(s: number) {
 function Footer() {
   return (
     <footer className="w-full border-t border-line px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] text-center text-xs text-ink-faint">
-      Be respectful. Use Next to skip anyone.
+      Be respectful. Use Next to skip anyone. Developed By the Ashonlogist.
     </footer>
   );
 }
