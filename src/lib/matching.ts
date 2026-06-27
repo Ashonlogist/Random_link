@@ -1,5 +1,10 @@
 import { supabase, type ChatMode, type ConnectionRow } from './supabase';
 
+// How long a connection can remain "connected" before we treat it as
+// abandoned (tab closed, crash, lost network) rather than a long chat.
+// Generous on purpose — this is a safety net, not the primary exit path.
+const STALE_CONNECTED_MS = 4 * 60 * 60 * 1000; // 4 hours
+
 /**
  * Affinity-based matching. Uses the server-side `match_partner` function which
  * scores waiting users by similarity to the caller's past partners (institution
@@ -63,6 +68,20 @@ export async function leaveWaitingRoom(myId: string) {
   await supabase.from('waiting_room').delete().eq('user_id', myId);
 }
 
+/**
+ * Marks a connection as ended so the partner's realtime subscription
+ * (listening for status === 'ended') can boot them out of the room.
+ * Safe to call even if the connection is already ended/missing.
+ */
+export async function endConnection(connectionId: string | null | undefined) {
+  if (!connectionId) return;
+  await supabase
+    .from('connections')
+    .update({ status: 'ended', ended_at: new Date().toISOString() })
+    .eq('id', connectionId)
+    .in('status', ['pending', 'connected']); // don't touch already-ended rows
+}
+
 export function subscribeToIncomingMatches(
   myId: string,
   onMatched: (conn: ConnectionRow) => void
@@ -90,11 +109,23 @@ export async function pruneStaleWaiting(maxAgeMs = 60000) {
 
 export async function pruneStaleConnections(maxAgeMs = 90000) {
   const cutoff = new Date(Date.now() - maxAgeMs).toISOString();
+
+  // Pending connections that never got accepted (e.g. offer/answer never completed)
   await supabase
     .from('connections')
     .delete()
     .eq('status', 'pending')
     .lt('created_at', cutoff);
+
+  // Connections that have been "connected" for a very long time with no
+  // explicit end are almost certainly abandoned (tab closed, network drop,
+  // crash) rather than a marathon chat. End them so any partner still
+  // sitting in the room gets released, and so stats don't grow unbounded.
+  await supabase
+    .from('connections')
+    .update({ status: 'ended', ended_at: new Date().toISOString() })
+    .eq('status', 'connected')
+    .lt('created_at', new Date(Date.now() - STALE_CONNECTED_MS).toISOString());
 }
 
 /**
