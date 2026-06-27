@@ -1187,18 +1187,17 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Connec
     if (currentReplyTarget) payload.reply_to_id = currentReplyTarget.id;
 
     try {
+      console.log('[SEND] About to call supabase.insert with payload:', payload);
       const { data, error } = await supabase.from('messages').insert(payload).select().maybeSingle();
+      console.log('[SEND] Supabase insert returned. data:', data, 'error:', error);
       if (!error && data) {
         setMessages((prev) => prev.map((msg) => (msg.id === temporaryId ? { ...data, reply_body: optimisticMessage.reply_body } : msg)));
       } else {
-        // TEMP DIAGNOSTIC: surface exactly why the insert failed instead of
-        // silently discarding it. Remove this console.error once the root
-        // cause is found and fixed.
-        console.error('[SEND FAILED] Supabase error inserting message:', error, 'payload was:', payload);
+        console.log('[SEND FAILED] Supabase error inserting message:', JSON.stringify(error), 'payload was:', payload);
         syncMessages(); // Recovery mechanism
       }
-    } catch (e) {
-      console.error('[SEND THREW] Exception while sending message:', e, 'payload was:', payload);
+    } catch (e: any) {
+      console.log('[SEND THREW] Exception while sending message:', e?.message, e, 'payload was:', payload);
       syncMessages(); // Recovery mechanism
     } finally {
       setSending(false); // Unlocks input bar no matter what happens
@@ -1218,6 +1217,8 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Connec
       setUploading(false);
     }
   };
+
+  console.log('[RENDER] TextRoom rendering with messages.length =', messages.length, 'conn.id =', conn.id);
 
   return (
     <div className="flex h-screen sm:h-[68vh] flex-col overflow-hidden sm:rounded-2xl border border-line bg-bg w-full">
