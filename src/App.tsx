@@ -1183,9 +1183,14 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Connec
       if (!error && data) {
         setMessages((prev) => prev.map((msg) => (msg.id === temporaryId ? { ...data, reply_body: optimisticMessage.reply_body } : msg)));
       } else {
+        // TEMP DIAGNOSTIC: surface exactly why the insert failed instead of
+        // silently discarding it. Remove this console.error once the root
+        // cause is found and fixed.
+        console.error('[SEND FAILED] Supabase error inserting message:', error, 'payload was:', payload);
         syncMessages(); // Recovery mechanism
       }
     } catch (e) {
+      console.error('[SEND THREW] Exception while sending message:', e, 'payload was:', payload);
       syncMessages(); // Recovery mechanism
     } finally {
       setSending(false); // Unlocks input bar no matter what happens
