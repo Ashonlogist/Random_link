@@ -22,41 +22,45 @@ export class PeerConnection {
   private subscribed = false;
   private closed = false;
   private pendingIce: any[] = [];
+  private channel: ReturnType<typeof supabase.channel> | null = null;
 
   constructor(conn: ConnectionRow, myId: string, events: PeerEvents) {
     this.conn = conn;
     this.myId = myId;
     this.isInitiator = conn.initiator_id === myId;
     this.events = events;
-    
-    console.log(`[WEBRTC DIAGNOSTIC] Spawning connection wrapper. Role: ${this.isInitiator ? 'Initiator' : 'Responder'}`);
-    this.pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
 
-    this.pc.onconnectionstatechange = () => {
+    this.pc = this.createPeer();
+  }
+
+  private createPeer(): RTCPeerConnection {
+    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+    pc.onconnectionstatechange = () => {
       if (this.closed) return;
-      const state = this.pc.connectionState;
-      console.log(`[WEBRTC DIAGNOSTIC] Connection status shifted to: ${state}`);
-      
+      const state = pc.connectionState;
+
       if (state === 'connected') this.events.onConnected?.();
       if (state === 'disconnected' || state === 'failed' || state === 'closed') {
         this.events.onDisconnected?.();
       }
     };
 
-    this.pc.ontrack = (e) => {
+    pc.ontrack = (e) => {
       if (this.closed) return;
-      console.log('[WEBRTC DIAGNOSTIC] Remote media stream tracks captured successfully.');
       this.events.onRemoteStream?.(e.streams[0]);
     };
 
-    this.pc.onicecandidate = (e) => {
+    pc.onicecandidate = (e) => {
       if (this.closed) return;
       if (e.candidate) {
         this.sendIceCandidate(e.candidate.toJSON()).catch((err) =>
-          console.error('[WEBRTC DIAGNOSTIC] Signaling ice exchange error:', err)
+          console.error('[WEBRTC] ICE exchange error:', err)
         );
       }
     };
+
+    return pc;
   }
 
   async attachLocalStream(stream: MediaStream | null) {
@@ -111,21 +115,80 @@ export class PeerConnection {
     await this.subscribeToConnection();
   }
 
-  private async subscribeToConnection() {
-    if (this.subscribed) return;
-    
-    const channelName = `conn-${this.conn.id}`;
-    const channel = supabase.channel(channelName);
+  /**
+   * Re-establishes the WebRTC handshake on an EXISTING connection row after
+   * a page refresh/reload wiped out the previous RTCPeerConnection. Both
+   * sides keep their original initiator/responder role; we just create a
+   * fresh RTCPeerConnection, clear the stale signaling data, and redo the
+   * offer/answer + ICE dance over the same connection_id. Call this instead
+   * of createOffer/acceptOffer when rejoining a connection that was already
+   * 'connected' before the reload.
+   */
+  async renegotiate() {
+    this.closed = false;
+    this.pendingIce = [];
+    this.subscribed = false;
+    // Tear down any previous peer object's listeners (it may already be
+    // dead after a reload, but guard against double-construction anyway).
+    try {
+      this.pc.onconnectionstatechange = null;
+      this.pc.onicecandidate = null;
+      this.pc.ontrack = null;
+      this.pc.close();
+    } catch {}
+    this.pc = this.createPeer();
 
-    // FIX: Idempotence guard against multi-binding handlers on active caches
-    if (channel.state === 'joined' || channel.state === 'joining') {
-      console.warn(`[WEBRTC] Channel ${channelName} is already active. Skipping duplicate assignment.`);
-      this.subscribed = true;
-      return;
+    if (this.localStream) {
+      for (const track of this.localStream.getTracks()) {
+        this.pc.addTrack(track, this.localStream);
+      }
     }
 
+    if (this.isInitiator) {
+      // Clear stale signaling so the responder doesn't try to answer an
+      // old offer, then write a fresh one.
+      await supabase
+        .from('connections')
+        .update({
+          sdp_offer: null,
+          sdp_answer: null,
+          ice_candidates_initiator: [],
+          ice_candidates_responder: [],
+        })
+        .eq('id', this.conn.id);
+      await this.createOffer();
+    } else {
+      // Wait for the initiator to publish a fresh offer, then accept it.
+      // Poll briefly since the initiator's renegotiate() may not have
+      // written the new offer yet (both sides reload independently).
+      const offer = await this.waitForFreshOffer();
+      if (!offer) throw new Error('Timed out waiting for partner to reconnect');
+      await this.acceptOffer();
+    }
+  }
+
+  private async waitForFreshOffer(maxWaitMs = 15000): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs) {
+      const { data } = await supabase
+        .from('connections')
+        .select('sdp_offer')
+        .eq('id', this.conn.id)
+        .maybeSingle();
+      if (data?.sdp_offer) return true;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    return false;
+  }
+
+  private async subscribeToConnection() {
+    if (this.subscribed) return;
     this.subscribed = true;
-    
+
+    const channelName = `conn-${this.conn.id}`;
+    const channel = supabase.channel(channelName);
+    this.channel = channel;
+
     channel
       .on(
         'postgres_changes',
@@ -187,6 +250,28 @@ export class PeerConnection {
       .eq('id', this.conn.id);
   }
 
+  /**
+   * Closes the peer locally WITHOUT marking the connection as 'ended' in the
+   * DB. Use this when the page is being torn down for a refresh/rejoin
+   * (e.g. via renegotiate() right after), so the partner is NOT booted out
+   * of the room while we're just reconnecting.
+   */
+  async closeLocalOnly() {
+    if (this.closed) return;
+    this.closed = true;
+    this.pc.onconnectionstatechange = null;
+    this.pc.onicecandidate = null;
+    this.pc.ontrack = null;
+    try {
+      this.pc.getSenders().forEach((s) => { if (s.track) s.track.stop(); });
+    } catch {}
+    try { this.pc.close(); } catch {}
+    if (this.channel) {
+      try { await supabase.removeChannel(this.channel); } catch {}
+      this.channel = null;
+    }
+  }
+
   async close() {
     if (this.closed) return;
     this.closed = true;
@@ -208,13 +293,10 @@ export class PeerConnection {
         .update({ status: 'ended', ended_at: new Date().toISOString() })
         .eq('id', this.conn.id);
     } catch {}
-    
-    // FIX: Fully delete the channel instance from global Realtime multiplexer cache
-    try {
-      const activeChannel = supabase.channel(`conn-${this.conn.id}`);
-      await supabase.removeChannel(activeChannel);
-    } catch (err) {
-      console.error('[WEBRTC] Failed to clean up channel cache:', err);
+
+    if (this.channel) {
+      try { await supabase.removeChannel(this.channel); } catch {}
+      this.channel = null;
     }
   }
 }
