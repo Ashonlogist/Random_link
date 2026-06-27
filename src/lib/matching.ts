@@ -69,6 +69,38 @@ export async function leaveWaitingRoom(myId: string) {
 }
 
 /**
+ * Like findMatch, but assumes the caller is ALREADY in waiting_room (skips
+ * the insert step). Used by background search polling, where the user
+ * stays registered in waiting_room continuously while the UI shows the
+ * Lobby instead of the Searching screen.
+ */
+export async function pollForMatch(
+  myId: string,
+  mode: ChatMode
+): Promise<ConnectionRow | null> {
+  const { data: partnerId, error: rpcErr } = await supabase.rpc('match_partner', { p_mode: mode });
+  if (rpcErr) throw new Error('Matching failed: ' + rpcErr.message);
+  if (!partnerId) return null;
+
+  const { count, error: delErr } = await supabase
+    .from('waiting_room')
+    .delete({ count: 'exact' })
+    .eq('user_id', partnerId);
+  if (delErr) throw new Error('Failed to claim partner: ' + delErr.message);
+  if (count !== 1) return null; // lost the race
+
+  await supabase.from('waiting_room').delete().eq('user_id', myId);
+
+  const { data: conn, error: cErr } = await supabase
+    .from('connections')
+    .insert({ initiator_id: myId, responder_id: partnerId, mode, status: 'pending' })
+    .select()
+    .single();
+  if (cErr) throw new Error('Failed to create connection: ' + cErr.message);
+  return conn as ConnectionRow;
+}
+
+/**
  * Marks a connection as ended so the partner's realtime subscription
  * (listening for status === 'ended') can boot them out of the room.
  * Safe to call even if the connection is already ended/missing.
