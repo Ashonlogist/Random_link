@@ -1173,7 +1173,11 @@ function TextRoom({ conn, myId, onNext, partnerProfile, onStop }: { conn: Connec
       reply_body: replyTarget ? replyTarget.body : null
     };
 
-    setMessages((prev) => [...prev, optimisticMessage]);
+    setMessages((prev) => {
+      console.log('[SEND] About to add optimistic message. prev.length =', prev.length, 'new message body:', optimisticMessage.body);
+      return [...prev, optimisticMessage];
+    });
+    console.log('[SEND] setMessages call completed, optimisticMessage was:', optimisticMessage);
     
     // Store it so we can push properly, then instantly clear the UI state
     const currentReplyTarget = replyTarget;
