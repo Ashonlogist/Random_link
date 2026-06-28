@@ -52,6 +52,30 @@ function clearActiveConn() {
   try { localStorage.removeItem(ACTIVE_CONN_KEY); } catch {}
 }
 
+// ---- Background search persistence ----
+// Without this, refreshing the page while "search in background" is
+// active loses that state entirely (plain useState resets on reload),
+// silently dropping the user out of the waiting room from their
+// perspective even though nothing in the UI told them it stopped.
+const BACKGROUND_SEARCH_KEY = 'randomlink_background_searching';
+
+function saveBackgroundSearch(mode: ChatMode) {
+  try { localStorage.setItem(BACKGROUND_SEARCH_KEY, mode); } catch {}
+}
+
+function readBackgroundSearch(): ChatMode | null {
+  try {
+    const raw = localStorage.getItem(BACKGROUND_SEARCH_KEY);
+    return raw === 'video' || raw === 'text' ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearBackgroundSearch() {
+  try { localStorage.removeItem(BACKGROUND_SEARCH_KEY); } catch {}
+}
+
 // ---- Unread message tracking (per friend) ----
 // Stored locally as { [friendId]: isoTimestamp } — "I have read everything
 // this friend sent up to this time." Not synced across devices, but needs
@@ -222,7 +246,7 @@ function ChatApp({
         if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
           const { data: sender } = await supabase.from('profiles').select('display_name, avatar_url').eq('user_id', payload.new.user_id).maybeSingle();
           const registration = await navigator.serviceWorker.ready;
-          registration.showNotification("Friend Request Received 🤝", {
+          registration.showNotification("New friend request", {
             body: `${sender?.display_name || 'Someone'} wants to add you as a friend!`,
             icon: sender?.avatar_url || undefined,
             tag: payload.new.id,
@@ -255,7 +279,7 @@ function ChatApp({
 
           if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
             const registration = await navigator.serviceWorker.ready;
-            registration.showNotification(`Incoming ${incomingCall.mode} Call 📞`, {
+            registration.showNotification(`Incoming ${incomingCall.mode} call`, {
               body: `${data?.display_name || 'A friend'} is calling you!`,
               tag: incomingCall.id,
               renotify: true,
@@ -329,7 +353,7 @@ function ChatApp({
       const partnerId = incoming.initiator_id === myId ? incoming.responder_id : incoming.initiator_id;
       const { data: partner } = await supabase.from('profiles').select('display_name, avatar_url').eq('user_id', partnerId).maybeSingle();
       const registration = await navigator.serviceWorker.ready;
-      registration.showNotification("Match Secured! 🎉", {
+      registration.showNotification("You've been matched", {
         body: `We paired you with ${partner?.display_name || 'a stranger'}. Ready to chat?`,
         icon: partner?.avatar_url || undefined,
         tag: incoming.id,
@@ -406,7 +430,7 @@ function ChatApp({
           const partnerId = incoming.initiator_id === myId ? incoming.responder_id : incoming.initiator_id;
           const { data: partner } = await supabase.from('profiles').select('display_name, avatar_url').eq('user_id', partnerId).maybeSingle();
 
-          const notifTitle = "You've been paired! 🎉";
+          const notifTitle = "You've been matched";
           const notifBody = `${partner?.display_name || 'Someone'} is ready to ${incoming.mode === 'video' ? 'video chat' : 'chat'} with you.`;
           const actions = [
             { action: 'pair_accept', title: 'Join now' },
@@ -494,7 +518,7 @@ function ChatApp({
           // is just the closed-tab fallback, harmless if it double-fires
           // since the shared `tag` lets the browser de-duplicate).
           sendPushTo(result.conn.responder_id, {
-            title: "You've been paired! 🎉",
+            title: "You've been matched",
             body: `Someone is ready to ${selectedMode === 'video' ? 'video chat' : 'chat'} with you.`,
             tag: result.conn.id,
             data: { connectionId: result.conn.id },
@@ -555,6 +579,7 @@ function ChatApp({
           isInitializingRef.current = true;
           backgroundSearchingRef.current = false;
           setBackgroundSearching(false);
+          clearBackgroundSearch();
           setMode(conn.mode);
           setConn(conn);
           setPhase('connected');
@@ -589,7 +614,7 @@ function ChatApp({
             .eq('user_id', conn.responder_id)
             .maybeSingle();
 
-          const notifTitle = "You've been paired! 🎉";
+          const notifTitle = "You've been matched";
           const notifBody = `${partner?.display_name || 'Someone'} is ready to ${conn.mode === 'video' ? 'video chat' : 'chat'} with you.`;
           const actions = [
             { action: 'pair_accept', title: 'Join now' },
@@ -628,10 +653,6 @@ function ChatApp({
     setRemoteStream(null);
     setConnectedAt(null);
     setFriendsDrawerOpen(false);
-
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission().catch(() => {});
-    }
 
     let stream: MediaStream | null = null;
     if (directMode === 'video') {
@@ -729,6 +750,7 @@ function ChatApp({
     isInitializingRef.current = false;
     backgroundSearchingRef.current = false;
     setBackgroundSearching(false);
+    clearBackgroundSearch();
     await teardownPeer();
     await leaveWaitingRoom(myId);
     unsubIncomingRef.current?.();
@@ -752,6 +774,7 @@ function ChatApp({
     backgroundSearchingRef.current = true;
     setBackgroundSearching(true);
     setPhase('lobby');
+    saveBackgroundSearch(modeRef.current);
     // Stop the camera while backgrounded — re-acquired fresh the moment
     // the user accepts a match (see the OPEN_CONNECTION message handler).
     // Leaving the camera light on while browsing elsewhere would be
@@ -762,6 +785,7 @@ function ChatApp({
   const stopBackgroundSearch = useCallback(async () => {
     backgroundSearchingRef.current = false;
     setBackgroundSearching(false);
+    clearBackgroundSearch();
     await handleStop();
   }, [handleStop]);
 
@@ -835,17 +859,65 @@ function ChatApp({
 
   // On mount, check whether we were mid-chat before a refresh/browser
   // close and silently rejoin instead of dropping the user in the lobby.
+  // If there's no active connection but background search was on, resume
+  // that instead — otherwise a refresh would silently drop the user out
+  // of the waiting room with no indication anything changed.
   useEffect(() => {
     if (hasAttemptedRejoinRef.current) return;
     hasAttemptedRejoinRef.current = true;
 
     const stored = readActiveConn();
-    if (!stored) {
-      setCheckingRejoin(false);
+    if (stored) {
+      rejoinConnection(stored).finally(() => setCheckingRejoin(false));
       return;
     }
 
-    rejoinConnection(stored).finally(() => setCheckingRejoin(false));
+    const bgMode = readBackgroundSearch();
+    if (bgMode) {
+      (async () => {
+        try {
+          // Ensure exactly one waiting_room row for us (defensive against
+          // duplicates if the previous one wasn't cleaned up yet).
+          await supabase.from('waiting_room').delete().eq('user_id', myId);
+          await supabase.from('waiting_room').insert({ user_id: myId, mode: bgMode });
+          backgroundSearchingRef.current = true;
+          setMode(bgMode);
+          setBackgroundSearching(true);
+          setPhase('lobby');
+
+          unsubIncomingRef.current?.();
+          unsubIncomingRef.current = subscribeToIncomingMatches(myId, async (incoming) => {
+            if (peerRef.current || isInitializingRef.current) return;
+            if (!backgroundSearchingRef.current) return;
+            const partnerId = incoming.initiator_id === myId ? incoming.responder_id : incoming.initiator_id;
+            const { data: partner } = await supabase.from('profiles').select('display_name, avatar_url').eq('user_id', partnerId).maybeSingle();
+            if ('Notification' in window && Notification.permission === 'granted') {
+              const registration = await navigator.serviceWorker.ready;
+              registration.showNotification("You've been matched", {
+                body: `${partner?.display_name || 'Someone'} is ready to ${incoming.mode === 'video' ? 'video chat' : 'chat'} with you.`,
+                icon: partner?.avatar_url || undefined,
+                tag: incoming.id,
+                renotify: true,
+                requireInteraction: true,
+                data: { connectionId: incoming.id, myId },
+                actions: [
+                  { action: 'pair_accept', title: 'Join now' },
+                  { action: 'pair_ignore', title: 'Keep searching' },
+                ],
+              });
+            }
+          });
+        } catch (err) {
+          console.error('Failed to resume background search:', err);
+          clearBackgroundSearch();
+        } finally {
+          setCheckingRejoin(false);
+        }
+      })();
+      return;
+    }
+
+    setCheckingRejoin(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -859,6 +931,13 @@ function ChatApp({
       if (msg.type === 'OPEN_CONNECTION' && msg.connectionId) {
         const { data: row } = await supabase.from('connections').select('*').eq('id', msg.connectionId).maybeSingle();
         if (row && row.status !== 'ended') {
+          backgroundSearchingRef.current = false;
+          setBackgroundSearching(false);
+          clearBackgroundSearch();
+          isInitializingRef.current = false;
+          await leaveWaitingRoom(myId);
+          unsubIncomingRef.current?.();
+          unsubIncomingRef.current = null;
           setMode(row.mode);
           setConn(row as ConnectionRow);
           setPhase('connected');
@@ -2054,7 +2133,7 @@ function formatTime(s: number) {
 function Footer() {
   return (
     <footer className="w-full border-t border-line px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] text-center text-xs text-ink-faint">
-      Be respectful. Use Next to skip anyone. Developed By the Ashonlogist.
+      Be respectful. Use Next to skip anyone.
     </footer>
   );
 }
